@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""supervise_all.py — 全套组件看门狗（无控制台，配 pythonw 静默运行）
+r"""supervise_all.py - Component watchdog for console-free operation with pythonw
 
-  组件                 存活判据              复活动作
-  常驻栈 stack.py       4567 在监听            svc\stack.py
-  443 拦截 mitmdump     443 在监听             mitmdump.exe（反向 api-prd + fsd_mock）
-  ARP 引流 arp_mitm     日志 120s 内有更新     tools\arp_mitm.py
-  看板 fsd_panel        8900 在监听            web\fsd_panel.py
+  Component             Health check                 Restart command
+  Stack supervisor      Port 4567 is listening       svc\stack.py
+  HTTPS interception    Port 443 is listening        mitmdump.exe (reverse proxy for api-prd with fsd_mock)
+  ARP redirection        Log updated within 120 s     tools\arp_mitm.py
+  Dashboard              Port 8900 is listening       web\fsd_panel.py
 
-每 30 秒一轮，日志 logs\supervise.log
+Checks run every 30 seconds. Logs are written to logs\supervise.log.
 """
 import os
 import socket
@@ -62,7 +62,7 @@ def main():
     while True:
         try:
             if not port_open(4567):
-                log("4567 未监听 -> 启动常驻栈")
+                log("Port 4567 is not listening. Starting the stack supervisor.")
                 spawn(PYW, [os.path.join(ROOT, "svc", "stack.py")])
                 time.sleep(8)
 
@@ -72,7 +72,7 @@ def main():
             except OSError:
                 fresh = False
             if not fresh:
-                log("ARP 引流停止 -> 重启")
+                log("ARP redirection stopped. Restarting it.")
                 spawn(PYW, [os.path.join(ROOT, "tools", "arp_mitm.py"),
                             "--target", "192.168.199.95", "--gateway", "192.168.199.1",
                             "--our-ip", "192.168.199.148", "--answer", "192.168.199.148",
@@ -80,7 +80,7 @@ def main():
                 time.sleep(8)
 
             if not port_open(443):
-                log("443 未监听 -> 启动拦截实例")
+                log("Port 443 is not listening. Starting HTTPS interception.")
                 spawn(MITMDUMP, ["-s", os.path.join(ROOT, "fsd_mock.py"),
                                  "--set", "confdir=" + os.path.join(ROOT, "certs2"),
                                  "--set", "ssl_insecure=true",
@@ -95,7 +95,7 @@ def main():
                 time.sleep(10)
 
             if not port_open(8900):
-                log("8900 未监听 -> 启动看板")
+                log("Port 8900 is not listening. Starting the dashboard.")
                 spawn(PYW, [os.path.join(ROOT, "web", "fsd_panel.py"), "--port", "8900"])
                 time.sleep(5)
         except Exception as exc:

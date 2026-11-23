@@ -11,7 +11,7 @@
 
 ### 第 1 步：双击安装
 
-双击 **`一键安装.cmd`**，等它跑完，按提示关闭窗口。
+双击 **`install.cmd`**，等它跑完，按提示关闭窗口。
 
 - 中途弹 UAC 就点「是」（首次补防火墙规则）。
 - 装完位置固定在 `C:\fsd-mitm`，桌面会多出两个图标。
@@ -33,7 +33,7 @@ C:\fsd-mitm\route-b.ps1 -Ssid FSD-PC -Key fsd2026!!
 
 ### 第 3 步：双击启动
 
-双击桌面 **「FSD一键启动」**。
+双击桌面 **「FSD Start」**。
 
 它会拉起 443 拦截、DNS 劫持、看板 8900，并在窗口里打印一张状态表。各项显示 OK 就可以进行下一步。
 
@@ -113,7 +113,7 @@ Get-Content C:\fsd-mitm\logs\hits.jsonl -Tail 5
 
 ### Q8：`dns_sink` 起不来，53 端口被占？
 
-Windows 热点的 DNS 代理有时会占住 53。先 `netstat -ano | findstr ":53 "` 找出占用进程并停掉，再双击一次「FSD一键启动」。
+Windows 热点的 DNS 代理有时会占住 53。先 `netstat -ano | findstr ":53 "` 找出占用进程并停掉，再双击一次「FSD Start」。
 
 ---
 
@@ -135,9 +135,36 @@ Windows 热点的 DNS 代理有时会占住 53。先 `netstat -ano | findstr ":5
 
 改 `C:\fsd-mitm\mode.json` 为 `{"mode":"observe"}`，或点看板右栏按钮。只记录、不回包，用来先看车机真实发了什么。
 
+### api-prd 監聽架構
+
+熱點模式下，`dns_sink.py` 記錄送到本機 DNS 的查詢。經過現有 HTTPS 代理且成功解密的請求，則由 `fsd_mock.py` 依記錄條件寫入請求日誌。看板的 **Show api-prd activity** 開關會從這兩份現有日誌讀取近期資料。
+
+```mermaid
+flowchart TD
+    car["車機連線"]
+    dns["本機 DNS<br/>dns_sink.py"]
+    proxy["現有 HTTPS 代理<br/>mitmproxy 與 fsd_mock.py"]
+    dnsLog["dns.jsonl<br/>查詢網域與來源 IP"]
+    httpLog["hits.jsonl<br/>已記錄的請求 URL 與來源 IP"]
+    filter["api_activity.py<br/>篩選 api-prd 並去除重複紀錄"]
+    dashboard["8899 / 8900 看板<br/>DNS 網域與 HTTP 請求分別標示"]
+
+    car -->|"送到本機的 DNS 查詢"| dns
+    car -->|"經過代理且成功解密的 HTTPS 請求"| proxy
+    dns --> dnsLog
+    proxy --> httpLog
+    dnsLog --> filter
+    httpLog --> filter
+    filter -->|"開啟 Show api-prd activity 時持續更新"| dashboard
+```
+
+- **DNS 紀錄**只包含查詢網域。即使看見新的區域網域，也還無法確認車機是否送出了 HTTPS 請求或呼叫了哪條 API 路徑。
+- **HTTP request 紀錄**顯示已記錄且符合篩選條件的 URL，保留主機與路徑，省略查詢參數。
+- **Show api-prd activity** 只控制看板是否整理並顯示這些紀錄，DNS 與代理仍照常記錄。`observe` 是獨立的代理模式，讓命中的請求繼續送往上游。
+
 ### 停止
 
-双击桌面 **「FSD一键停止」**，或：
+双击桌面 **「FSD Stop」**，或：
 
 ```powershell
 C:\fsd-mitm\stop_hotspot.cmd            # 停三个组件，热点保持
@@ -209,7 +236,7 @@ powershell -File C:\fsd-mitm\stop_api_intercept.ps1   # 只撤 api-prd 拦截
 
 ```
 fsd-mitm\
-├─ 一键安装.cmd          双击安装
+├─ install.cmd          双击安装
 ├─ install.ps1           安装器本体
 ├─ README.md             本文件
 └─ app\

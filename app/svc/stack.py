@@ -1,10 +1,10 @@
-"""svc/stack.py — 常驻守护：DNS sink + mitmproxy reverse(4567) + proxy(8080)
+"""svc/stack.py - Background supervisor for the DNS sink, reverse proxy (4567), and proxy (8080)
 
-  - 每 8 秒检查一次端口，挂了自动拉起
-  - 所有子进程日志写到 logs\\<name>.log
-  - 位置：C:\\fsd-mitm\\svc\\stack.py
+  - Check ports every eight seconds and restart failed processes
+  - Write child process logs to logs\\<name>.log
+  - Installed at C:\\fsd-mitm\\svc\\stack.py
 
-启动（脱离当前会话，关了终端也不死）：
+Start in the background so it continues after the terminal closes:
   Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
       CommandLine = '"C:\\fsd-mitm\\venv\\Scripts\\python.exe" "C:\\fsd-mitm\\svc\\stack.py"'
       CurrentDirectory = 'C:\\fsd-mitm'
@@ -36,8 +36,8 @@ IGNORE = r"^(hermes-prd|hermes-stream-prd|telemetry-prd)\.vn\.cloud\.tesla\.cn(?
 LOGS.mkdir(parents=True, exist_ok=True)
 proc: dict[str, subprocess.Popen] = {}
 
-# 单实例锁：多个启动器（Startup .cmd / 计划任务 / 手动双击）同时触发时，
-# 只允许一份守护进程，其余进程绑定失败直接退出，避免重复拉起 dns/reverse/proxy/web。
+# The launcher, scheduled task, and manual startup can run at the same time.
+# Only the process that acquires the lock starts the DNS, reverse proxy, proxy, and dashboard.
 LOCK_PORT = 45799
 _lock_sock: socket.socket | None = None
 
@@ -82,7 +82,7 @@ def tcp_open(port: int) -> bool:
 
 
 def udp_open(port: int) -> bool:
-    """Windows 上没法直接判断 UDP 是否被占，用 bind 反证。"""
+    """Check UDP port availability on Windows by trying to bind it."""
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -162,7 +162,7 @@ def ensure(ip: str) -> str:
             proc.pop(name)
 
 
-    # 换了 WiFi/网段：DNS 应答里写的是启动时的 IP，必须跟着换
+    # Update the IP returned by DNS when the Wi-Fi network or subnet changes.
     if LAST_IP["ip"] and LAST_IP["ip"] != ip:
         log(f"local ip changed {LAST_IP['ip']} -> {ip} | restarting dns sink")
         old = proc.pop("dns", None)
@@ -216,7 +216,7 @@ def main() -> None:
                            "udp53": dns_status == "listening",
                            "dns_status": dns_status,
                            "children": {k: v.pid for k, v in proc.items()}}, fh, ensure_ascii=False)
-        except Exception as exc:  # 守护进程不能死
+        except Exception as exc:  # Keep the supervisor running after an error.
             log(f"ensure error: {type(exc).__name__}: {exc}")
         time.sleep(8)
 

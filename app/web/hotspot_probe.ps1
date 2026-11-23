@@ -1,8 +1,8 @@
 ﻿#requires -Version 5.1
 <#
-hotspot_probe.ps1 — 给 WEB 看板用的探针：输出单行 JSON
+hotspot_probe.ps1 - Write a single JSON status record for the web dashboard
   {"state":"On|Off","ssid":"...","clients":[{"mac":"..","name":".."}]}
-不弹 UAC、不改配置，只读。
+This read-only probe does not change settings or prompt for elevation.
 #>
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
@@ -46,7 +46,7 @@ try {
         $out.clients += [ordered]@{ mac = $c.MacAddress; name = $name }
     }
 } catch {
-    # 拿不到客户端列表不影响状态显示
+    # Keep reporting hotspot status if the client list is unavailable.
 }
 
 $out | ConvertTo-Json -Depth 4 -Compress

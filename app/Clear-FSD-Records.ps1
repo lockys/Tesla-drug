@@ -1,16 +1,16 @@
 ﻿#requires -Version 5.1
 <#
-Clear-FSD-Records.ps1 — 清空看板记录（只动 <项目>\logs 里的记录文件）
+Clear-FSD-Records.ps1 - Clear dashboard records from <project>\logs
 
-  .\Clear-FSD-Records.ps1            # 预演：只列出将删除的文件和体积，不动手
-  .\Clear-FSD-Records.ps1 -Force     # 真删
+  .\Clear-FSD-Records.ps1            # Preview the files and sizes without deleting them
+  .\Clear-FSD-Records.ps1 -Force     # Delete the listed files
 
-会删：hits.jsonl / dns.jsonl / arp_mitm.log / handshake.log / car_recent.jsonl /
+Deletes: hits.jsonl / dns.jsonl / arp_mitm.log / handshake.log / car_recent.jsonl /
       config_history.jsonl / requests\ / *.log / __pycache__
-不删：logs 目录本身、payload.json、payload.json.bak、certs、任何源码
+Preserves the logs directory, payload.json, payload.json.bak, certificates, and source files.
 
-为什么这样做：看板（8900）是只读的，页面上所有记录都来自 logs\ —— 清 logs 即清看板。
-看板在跑时不影响，刷新页面即为空；不放心可先 stop_fsd_all.ps1。
+The read-only dashboard on port 8900 displays records from logs\.
+Refresh the running dashboard after clearing the records, or stop it first with stop_fsd_all.ps1.
 #>
 [CmdletBinding()]
 param(
@@ -22,21 +22,21 @@ $ErrorActionPreference = 'Stop'
 $logs = Join-Path $Root 'logs'
 
 if (-not (Test-Path -LiteralPath $logs)) {
-    Write-Host "没有 logs 目录：$logs" -ForegroundColor Yellow
-    Write-Host '看板本来就没有记录。' -ForegroundColor Green
+    Write-Host "Logs directory does not exist: $logs" -ForegroundColor Yellow
+    Write-Host 'The dashboard has no records.' -ForegroundColor Green
     return
 }
 
 $targets = @(Get-ChildItem -LiteralPath $logs -Force -ErrorAction SilentlyContinue)
 if ($targets.Count -eq 0) {
-    Write-Host "logs 已空：$logs" -ForegroundColor Green
-    Write-Host '看板没有记录可删。' -ForegroundColor Green
+    Write-Host "Logs directory is already empty: $logs" -ForegroundColor Green
+    Write-Host 'There are no dashboard records to clear.' -ForegroundColor Green
     return
 }
 
 $total = 0
 Write-Host ''
-Write-Host "将清理：$logs" -ForegroundColor Cyan
+Write-Host "Logs directory to clear: $logs" -ForegroundColor Cyan
 foreach ($t in $targets) {
     $size = 0
     if ($t.PSIsContainer) {
@@ -49,22 +49,22 @@ foreach ($t in $targets) {
     $total += $size
     Write-Host ("  {0,-44} {1,10:N1} KB" -f $t.Name, ($size / 1KB))
 }
-Write-Host ("  合计 {0:N1} KB / {1} 项" -f ($total / 1KB), $targets.Count) -ForegroundColor DarkGray
+Write-Host ("  Total: {0:N1} KB in {1} items" -f ($total / 1KB), $targets.Count) -ForegroundColor DarkGray
 
 if (-not $Force) {
     Write-Host ''
-    Write-Host '这是预演，什么都没删。确认执行：' -ForegroundColor Yellow
+    Write-Host 'Preview complete. To delete the files, run:' -ForegroundColor Yellow
     Write-Host '  .\Clear-FSD-Records.ps1 -Force' -ForegroundColor Yellow
     return
 }
 
-# 只删 logs 下的条目，绝不删 logs 目录本身
+# Delete only entries inside logs, keeping the directory itself.
 foreach ($t in $targets) {
     Remove-Item -LiteralPath $t.FullName -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $left = @(Get-ChildItem -LiteralPath $logs -Force -ErrorAction SilentlyContinue)
 Write-Host ''
-Write-Host ("已清空，剩余 {0} 项" -f $left.Count) -ForegroundColor Green
-foreach ($l in $left) { Write-Host "  残留 $($l.Name)" -ForegroundColor Yellow }
-Write-Host '看板（8900）刷新即为空。' -ForegroundColor Green
+Write-Host ("Finished clearing records. {0} items remain." -f $left.Count) -ForegroundColor Green
+foreach ($l in $left) { Write-Host "  Remaining: $($l.Name)" -ForegroundColor Yellow }
+Write-Host 'Refresh the dashboard on port 8900 to see the updated records.' -ForegroundColor Green

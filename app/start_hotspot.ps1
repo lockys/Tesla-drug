@@ -1,15 +1,15 @@
 ﻿#requires -Version 5.1
 <#
-start_hotspot.ps1 — 热点模式一键启动（默认链路）
+start_hotspot.ps1 - Start the FSD intercept environment in hotspot mode (default)
 
-  手机 USB 共享网络 → 电脑开热点 FSD-PC → 车机连 FSD-PC
-  车机网关/DNS 都是本机 192.168.137.1，电脑本身就是网关，所以不做 ARP 投毒。
+  Share a phone connection over USB, start the FSD-PC hotspot, and connect the vehicle to FSD-PC.
+  The PC at 192.168.137.1 acts as the vehicle's gateway and DNS server, so ARP poisoning is unnecessary.
 
-  .\start_hotspot.ps1                  # 启动 443 拦截 + DNS 劫持 + 看板 8900
-  .\start_hotspot.ps1 -Status          # 只看状态，不动手
+  .\start_hotspot.ps1                  # Start the HTTPS intercept, DNS redirect, and dashboard on port 8900
+  .\start_hotspot.ps1 -Status          # Show status only
   .\start_hotspot.ps1 -OurIp 192.168.137.1
 
-路由模式（车机与电脑连同一台路由器）请改用 start_all.cmd。
+For router mode, connect the vehicle and PC to the same router and run start_all.cmd.
 #>
 [CmdletBinding()]
 param([switch]$Status, [switch]$Elevated, [switch]$NoFirewall, [string]$OurIp = '192.168.137.1')
@@ -43,22 +43,22 @@ function CarSeen {
 
 function Show-Status {
     $rows = @(
-        [pscustomobject]@{ 组件='443 拦截';  状态=$(if (PortOpen 443) { 'OK' } else { 'DOWN' }) },
-        [pscustomobject]@{ 组件='DNS 53';    状态=$(if ((ProcCount 'dns_sink\.py') -gt 0) { 'OK' } else { 'DOWN' }) },
-        [pscustomobject]@{ 组件='看板 8900'; 状态=$(if (PortOpen 8900) { 'OK' } else { 'DOWN' }) },
-        [pscustomobject]@{ 组件="热点 $OurIp"; 状态=$(if (HotspotIpUp) { 'OK' } else { 'DOWN' }) },
-        [pscustomobject]@{ 组件='车机在线';  状态=$(if (CarSeen) { 'OK' } else { '未见' }) }
+        [pscustomobject]@{ Component='HTTPS intercept 443'; Status=$(if (PortOpen 443) { 'OK' } else { 'DOWN' }) },
+        [pscustomobject]@{ Component='DNS 53'; Status=$(if ((ProcCount 'dns_sink\.py') -gt 0) { 'OK' } else { 'DOWN' }) },
+        [pscustomobject]@{ Component='Dashboard 8900'; Status=$(if (PortOpen 8900) { 'OK' } else { 'DOWN' }) },
+        [pscustomobject]@{ Component="Hotspot $OurIp"; Status=$(if (HotspotIpUp) { 'OK' } else { 'DOWN' }) },
+        [pscustomobject]@{ Component='Vehicle online'; Status=$(if (CarSeen) { 'OK' } else { 'Not detected' }) }
     )
     $rows | Format-Table -AutoSize | Out-String -Width 80
 }
 
-Write-Host "`n===== FSD 拦截环境 · 热点模式 =====" -ForegroundColor Cyan
+Write-Host "`n===== FSD Intercept Environment (Hotspot Mode) =====" -ForegroundColor Cyan
 
 if ($Status) { Show-Status; return }
 
-# 1) 防火墙（443 TCP / 53 UDP 入站）
+# 1) Inbound firewall rules for TCP 443 and UDP 53
 if ($NoFirewall) {
-    Write-Host '防火墙: 已跳过（-NoFirewall）' -ForegroundColor DarkGray
+    Write-Host 'Firewall: Skipped (-NoFirewall)' -ForegroundColor DarkGray
 } else {
 $rules = @(
     @{ Name='fsd-mitm-api443'; Proto='TCP'; Port=443 },
@@ -70,27 +70,27 @@ if ($missing.Count -gt 0) {
         foreach ($r in $missing) {
             New-NetFirewallRule -DisplayName $r.Name -Direction Inbound -Action Allow -Protocol $r.Proto -LocalPort $r.Port -Profile Any -Description 'FSD lab' -ErrorAction SilentlyContinue | Out-Null
         }
-        Write-Host ("防火墙: 已补 {0} 条规则" -f $missing.Count) -ForegroundColor Green
+        Write-Host ("Firewall: Added {0} rules" -f $missing.Count) -ForegroundColor Green
     } else {
-        Write-Host ("防火墙: 缺 {0} 条规则，正在提权补（请点 UAC）..." -f $missing.Count) -ForegroundColor Yellow
+        Write-Host ("Firewall: {0} rules are missing. Approve the UAC prompt to add them." -f $missing.Count) -ForegroundColor Yellow
         Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Verb RunAs `
             -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Elevated' | Out-Null
         Start-Sleep -Seconds 4
     }
-} else { Write-Host '防火墙: 规则齐全' -ForegroundColor Green }
+} else { Write-Host 'Firewall: All required rules are present' -ForegroundColor Green }
 }
 
-# 2) 热点检查（不自动开，提示用户）
+# 2) Check the hotspot and prompt the user if it is down.
 if (HotspotIpUp) {
-    Write-Host "热点: $OurIp 在线" -ForegroundColor Green
+    Write-Host "Hotspot: $OurIp is online" -ForegroundColor Green
 } else {
-    Write-Host "热点: 没有 $OurIp —— 先开热点（手机 USB 共享网络 + 下面这条命令）" -ForegroundColor Yellow
+    Write-Host "Hotspot: $OurIp is unavailable. Share a phone connection over USB and run the command below to enable the hotspot." -ForegroundColor Yellow
     Write-Host '      C:\fsd-mitm\route-b.ps1 -Ssid FSD-PC -Key fsd2026!!' -ForegroundColor Yellow
 }
 
-# 3) 443 反向拦截
+# 3) Reverse proxy on port 443
 if (-not (PortOpen 443)) {
-    Write-Host '443 拦截: 启动中...' -ForegroundColor Yellow
+    Write-Host 'HTTPS intercept 443: Starting...' -ForegroundColor Yellow
     $env:FSD_MOCK_JSON      = Join-Path $root 'payload.json'
     $env:FSD_MOCK_LOG_DIR   = $logs
     $env:FSD_MOCK_LOG_ALL   = '1'
@@ -101,28 +101,28 @@ if (-not (PortOpen 443)) {
            '--mode','reverse:https://api-prd.vn.cloud.tesla.cn@443')
     Start-Process -FilePath $mitm -ArgumentList $a -WindowStyle Hidden
     Start-Sleep -Seconds 8
-} else { Write-Host '443 拦截: 已在运行' -ForegroundColor Green }
+} else { Write-Host 'HTTPS intercept 443: Already running' -ForegroundColor Green }
 
-# 4) DNS 劫持（UDP 53，没有 TCP 监听可探，按进程判活）
+# 4) DNS redirection on UDP 53. Check the process because there is no TCP listener.
 if ((ProcCount 'dns_sink\.py') -eq 0) {
-    Write-Host 'DNS 53: 启动中...' -ForegroundColor Yellow
+    Write-Host 'DNS 53: Starting...' -ForegroundColor Yellow
     Start-Process -FilePath $py -WindowStyle Hidden -ArgumentList @(
         (Join-Path $root 'dns_sink.py'), '--ip', $OurIp, '--redirect', 'api-prd.vn.cloud.tesla.cn')
     Start-Sleep -Seconds 3
     if ((ProcCount 'dns_sink\.py') -eq 0) {
-        Write-Host 'DNS 53: 起不来 —— 多半是 53 被别的进程占着（热点 DNS 代理常见），查 netstat -ano | findstr ":53 "' -ForegroundColor Red
+        Write-Host 'DNS 53: Failed to start. Another process, such as the hotspot DNS proxy, may be using port 53. Check with netstat -ano | findstr ":53 "' -ForegroundColor Red
     }
-} else { Write-Host 'DNS 53: 已在运行' -ForegroundColor Green }
+} else { Write-Host 'DNS 53: Already running' -ForegroundColor Green }
 
-# 5) 看板
+# 5) Dashboard
 if (-not (PortOpen 8900)) {
-    Write-Host '看板 8900: 启动中...' -ForegroundColor Yellow
+    Write-Host 'Dashboard 8900: Starting...' -ForegroundColor Yellow
     Start-Process -FilePath $pyw -ArgumentList @((Join-Path $root 'web\fsd_panel.py'),'--port','8900') -WindowStyle Hidden
     Start-Sleep -Seconds 3
-} else { Write-Host '看板 8900: 已在运行' -ForegroundColor Green }
+} else { Write-Host 'Dashboard 8900: Already running' -ForegroundColor Green }
 
-Write-Host "`n===== 状态 =====" -ForegroundColor Cyan
+Write-Host "`n===== Status =====" -ForegroundColor Cyan
 Show-Status
-Write-Host "看板:   http://127.0.0.1:8900" -ForegroundColor Green
-Write-Host "配置:   http://127.0.0.1:8900/config" -ForegroundColor Green
-Write-Host "停止:   C:\fsd-mitm\stop_hotspot.cmd`n" -ForegroundColor DarkGray
+Write-Host "Dashboard:     http://127.0.0.1:8900" -ForegroundColor Green
+Write-Host "Configuration: http://127.0.0.1:8900/config" -ForegroundColor Green
+Write-Host "Stop:          C:\fsd-mitm\stop_hotspot.cmd`n" -ForegroundColor DarkGray

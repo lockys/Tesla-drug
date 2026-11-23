@@ -1,6 +1,6 @@
 ﻿#requires -Version 5.1
 <#
-stop_stack.ps1 — 停掉常驻栈（stack.py + dns + reverse + proxy + web）
+stop_stack.ps1 - Stop the service stack (stack.py, DNS, reverse proxy, forward proxy, and web dashboard)
 
   .\svc\stop_stack.ps1
 #>

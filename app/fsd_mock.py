@@ -1,23 +1,23 @@
 """
-fsd_mock.py — mitmproxy addon: 伪造 /feature_configuration 响应
+fsd_mock.py - mitmproxy addon that supplies a replacement /feature_configuration response
 
-命中任意路径里的 /feature_configuration -> 200 + 固定 JSON，并按 body 重算
+Paths containing /feature_configuration get HTTP 200 and a fixed JSON response, with the following headers recalculated from the body:
     X-Checksum: md5(body).hexdigest()
 
-两种接法：
-  1) 车机走 HTTP 明文（mothership.vn.teslamotors.com:4567 / 网关改写前）——不用证书：
+Connection options:
+  1) The vehicle uses plain HTTP (mothership.vn.teslamotors.com:4567, before gateway rewriting). No certificate is needed:
      mitmdump -s fsd_mock.py --mode reverse:http://<REAL_IP>:4567 \
               --listen-host 0.0.0.0 --listen-port 4567 --set keep_host_header=true
-  2) 车机/网关走 HTTPS 且愿意装 mitmproxy CA（或可被代理）：
+  2) The vehicle or gateway uses HTTPS and trusts the mitmproxy CA (or can use the proxy):
      mitmdump -s fsd_mock.py --mode regular@8080 --listen-host 0.0.0.0
 
-环境变量（都可选）：
-  FSD_MOCK=0                 关闭替换（默认开）
-  FSD_MOCK_JSON=<path>       外部 JSON 覆盖 payload（自动压单行并重算 checksum）
-  FSD_MOCK_HOSTS=a.com,b.com 只对这些 Host 生效（默认全部）
-  FSD_MOCK_METHOD=POST       只对这些方法生效（默认全部）
-  FSD_MOCK_LOG_DIR=<dir>     命中日志目录（默认 ./logs）
-  FSD_MOCK_VERBOSE=1         把未命中的 feature* 请求也打出来
+Optional environment variables:
+  FSD_MOCK=0                 Disable replacement (enabled by default)
+  FSD_MOCK_JSON=<path>       Load the payload from a JSON file, compact it, and recalculate the checksum
+  FSD_MOCK_HOSTS=a.com,b.com Apply only to these hosts (default: all hosts)
+  FSD_MOCK_METHOD=POST       Apply only to these methods (default: all methods)
+  FSD_MOCK_LOG_DIR=<dir>     Directory for request match logs (default: ./logs)
+  FSD_MOCK_VERBOSE=1         Also log unmatched feature* requests
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ import time
 
 from mitmproxy import ctx, http
 
-# 车机侧期望的 9 个字段（compact JSON，282 字节）
+# The vehicle expects nine fields (282 bytes of compact JSON).
 DEFAULT_PAYLOAD = {
     "eu_fsd_allowed_country_codes": "CHN",
     "eu_fsd_allow_region_override": True,
@@ -72,7 +72,7 @@ class FsdMock:
         self.log_all = os.environ.get("FSD_MOCK_LOG_ALL", "0") not in {"0", "false", "off"}
         self.log_dir = os.environ.get("FSD_MOCK_LOG_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs"))
         os.makedirs(self.log_dir, exist_ok=True)
-        # 模式文件：{"mode":"reply"|"observe"}，不改文件即默认 reply；看板改它即时生效
+        # Mode file: {"mode":"reply"|"observe"}. Defaults to reply. Dashboard changes take effect immediately.
         self.mode_path = os.environ.get("FSD_MOCK_MODE_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "mode.json"))
         self.mode = "reply"
         self.mode_mtime = 0.0
@@ -99,7 +99,7 @@ class FsdMock:
             "fsd_mock",
             bool,
             os.environ.get("FSD_MOCK", "1") not in {"0", "false", "False", "off"},
-            "启用 /feature_configuration 响应替换",
+            "Enable /feature_configuration response replacement",
         )
 
     def running(self) -> None:
@@ -173,7 +173,7 @@ class FsdMock:
         self.mode_mtime = mtime
 
     def _capture(self, flow: http.HTTPFlow) -> dict:
-        """把车机这条请求原样记下来：方法/头/body 长度/md5/VIN，body 落盘。"""
+        """Log the request method, headers, body length, MD5, and VIN, and save the body to disk."""
         body = flow.request.content or b""
         ctype = flow.request.headers.get("content-type", "")
         vin = ""
@@ -202,7 +202,7 @@ class FsdMock:
         return info
 
     def _maybe_reload(self) -> None:
-        """payload.json 被 WEB 面板改过就热加载，不用重启 mitmproxy。"""
+        """Reload payload.json after dashboard edits without restarting mitmproxy."""
         p = self.payload_path
         if not p:
             return
@@ -226,7 +226,7 @@ class FsdMock:
         ctx.log.warn(f"[fsd_mock] payload reloaded -> {len(self.body)}B, md5={self.checksum}")
 
     def request(self, flow: http.HTTPFlow) -> None:
-        # 每条新连接第一次请求时记一次握手成功（此刻 tls_version/cipher/cert 都已就绪）
+        # Log the successful handshake on the first request per connection, when TLS details are available.
         try:
             cc = flow.client_conn
             key = "%s|%s" % (getattr(cc, "id", ""), getattr(cc, "peername", ""))
@@ -263,16 +263,16 @@ class FsdMock:
             self._log("FLOW", flow, {"sni": getattr(flow.client_conn, "sni", None)})
 
         if self._hit(flow):
-            info = self._capture(flow)   # 先看清车机发了什么
+            info = self._capture(flow)   # Record the original vehicle request.
             if self.mode == "observe":
-                # 只记录不回包：请求照常走上游
+                # Record the request and let it continue upstream.
                 self._log("OBSERVE", flow, info)
                 ctx.log.warn(f"[fsd_mock] OBSERVE-only {flow.request.method} {flow.request.pretty_url} "
                              f"({info['req_bytes']}B)")
                 return
 
             self.hits += 1
-            # 然后才回包（短路，不访问上游）
+            # Send the replacement response locally.
             flow.response = http.Response.make(
                 200,
                 self.body,
@@ -296,7 +296,7 @@ class FsdMock:
             ctx.log.info(f"[fsd_mock] near-miss {flow.request.method} {flow.request.pretty_url}")
 
 
-    # ---------------- 握手观测（真实车机每次建 TLS 都会记一行） ----------------
+    # ---------------- TLS handshake logging ----------------
     def _hs(self, rec: dict) -> None:
         try:
             with open(os.path.join(self.log_dir, "handshake.log"), "a", encoding="utf-8") as fh:

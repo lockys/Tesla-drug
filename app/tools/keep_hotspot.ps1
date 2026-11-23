@@ -1,14 +1,14 @@
 ﻿#requires -Version 5.1
 <#
-keep_hotspot.ps1 — 保活 Windows 移动热点（FSD-PC）
+keep_hotspot.ps1 - Keep the FSD-PC Windows Mobile Hotspot running
 
-  .\tools\keep_hotspot.ps1                  # 一直盯，掉了就拉起来
+  .\tools\keep_hotspot.ps1                  # Keep monitoring and restart the hotspot if it stops
   .\tools\keep_hotspot.ps1 -Minutes 120
-  .\tools\keep_hotspot.ps1 -Once            # 只检查一次
+  .\tools\keep_hotspot.ps1 -Once            # Check once
 
-背景：Windows 移动热点在无客户端时会在数分钟后自动关闭（实测 18:55:25 开 → 19:00:25 关）。
-车机连 FSD-PC 之前必须保证热点在，所以这里做保活。
-日志：C:\fsd-mitm\logs\hotspot-keeper.log
+Windows Mobile Hotspot may turn off after several minutes with no clients (observed after five minutes).
+Keep the hotspot available until the vehicle connects to FSD-PC.
+Log: C:\fsd-mitm\logs\hotspot-keeper.log
 #>
 [CmdletBinding()]
 param(

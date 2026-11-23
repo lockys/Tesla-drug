@@ -1,18 +1,19 @@
 ﻿#requires -Version 5.1
 <#
-install.ps1 —— FSD 拦截环境（热点模式）一键安装器
+install.ps1 - FSD intercept environment installer (hotspot mode)
 
-  双击「一键安装.cmd」即可；或在本目录执行：
+  Run the one-click CMD launcher, or run this script from this directory:
 
-    .\install.ps1                 # 体检 → 复制 → 建 venv → 装依赖 → 快捷方式 → 自启 → 启动
-    .\install.ps1 -Check          # 只体检，不动任何文件
-    .\install.ps1 -SkipVenv       # 已有可用的 venv，跳过重建
-    .\install.ps1 -NoStart        # 部署完不启动
-    .\install.ps1 -UseMirror      # pip 走清华源（国内网络慢时用）
-    .\install.ps1 -Force          # 目标已有部署时强制覆盖源码（保留 logs / venv，备份 payload.json）
+    .\install.ps1                 # Check, copy, create venv, install dependencies, set up shortcuts and startup, then launch
+    .\install.ps1 -Check          # Run checks without changing any files
+    .\install.ps1 -SkipVenv       # Use an existing venv without rebuilding it
+    .\install.ps1 -NoStart        # Install without launching
+    .\install.ps1 -UseMirror      # Use the Tsinghua mirror for pip
+    .\install.ps1 -AutoInstallPython # Install Python via WinGet if no compatible interpreter is found
+    .\install.ps1 -Force          # Overwrite deployed source files, keep logs and venv, and back up payload.json
 
-安装目录固定 C:\fsd-mitm：项目里约 24 处路径是写死的（svc\stack.py、tools\supervise_all.py、
-web\server.py、stop_stack.ps1 等），换盘必须逐处改，本安装器不做这种改写。
+The installation directory is fixed at C:\fsd-mitm. About 24 paths are hard-coded, including in
+svc\stack.py, tools\supervise_all.py, web\server.py, and stop_stack.ps1. Edit them before changing drives.
 #>
 [CmdletBinding()]
 param(
@@ -55,45 +56,55 @@ function Test-Port([int]$p) {
 function Test-PythonExe([string]$Exe, [string[]]$PreArgs = @()) {
     if (-not $Exe) { return $null }
     if (-not (Test-Path -LiteralPath $Exe)) { return $null }
-    # Microsoft Store 的 App Execution Alias：0 字节占位符，执行只会弹商店 —— 必须排除
+    # Skip Microsoft Store execution aliases and zero-byte placeholders.
     if ($Exe -match '\\WindowsApps\\') { return $null }
     try { $item = Get-Item -LiteralPath $Exe -Force -ErrorAction Stop } catch { return $null }
     if ($item.Length -eq 0) { return $null }
     try {
-        $raw = & $Exe @PreArgs -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null
+        $raw = & $Exe @PreArgs -I -c "import ensurepip, sys, venv; print('%d.%d' % sys.version_info[:2])" 2>$null
     } catch { return $null }
     if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
     $v = "$(@($raw) | Select-Object -First 1)".Trim()
     if ($v -notmatch '^(\d+)\.(\d+)$') { return $null }
     $maj = [int]$Matches[1]; $min = [int]$Matches[2]
-    if ($maj -lt 3 -or ($maj -eq 3 -and $min -lt 10)) { return $null }
+    # mitmproxy 12.3.1 in requirements.txt requires Python 3.12 or later.
+    if ($maj -ne 3 -or $min -lt 12) { return $null }
     return [pscustomobject]@{ Exe = $Exe; Pre = $PreArgs; Version = $v; Via = '' }
 }
 
+function Test-InstalledVenv([string]$VenvDir) {
+    $python = Join-Path $VenvDir 'Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath (Join-Path $VenvDir 'Scripts\pythonw.exe') -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $VenvDir 'Scripts\mitmdump.exe') -PathType Leaf) -or
+        -not (Test-PythonExe $python)) {
+        return $false
+    }
+    & $python -I -m pip check *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Find-Python {
-    # 1) 用户显式指定
+    # 1) Explicit interpreter path
     if ($PythonExe) {
         $c = Test-PythonExe $PythonExe
         if ($c) { $c.Via = '-PythonExe'; return $c }
-        Note "指定的 Python 不可用：$PythonExe"
+        Note "Specified Python is unavailable: $PythonExe"
     }
-    # 2) PATH（Store 占位符会被 Test-PythonExe 拒掉）
+    # 2) PATH
     foreach ($n in @('python', 'python3')) {
-        $cmd = Get-Command $n -ErrorAction SilentlyContinue
-        if ($cmd) {
+        foreach ($cmd in @(Get-Command $n -All -CommandType Application -ErrorAction SilentlyContinue)) {
             $c = Test-PythonExe $cmd.Source
             if ($c) { $c.Via = "PATH ($n)"; return $c }
         }
     }
-    # 3) py 启动器
-    $pyCmd = Get-Command 'py' -ErrorAction SilentlyContinue
-    if ($pyCmd) {
-        foreach ($v in @('3.12', '3.11', '3.13', '3')) {
+    # 3) Python launcher
+    foreach ($pyCmd in @(Get-Command 'py' -All -CommandType Application -ErrorAction SilentlyContinue)) {
+        foreach ($v in @('3.12', '3.13', '3.14', '3')) {
             $c = Test-PythonExe $pyCmd.Source @("-$v")
             if ($c) { $c.Via = "py -$v"; return $c }
         }
     }
-    # 4) 标准安装目录
+    # 4) Standard installation directories
     foreach ($pat in @(
             "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe",
             "C:\Python3*\python.exe",
@@ -101,10 +112,10 @@ function Find-Python {
             "${env:ProgramFiles(x86)}\Python3*\python.exe")) {
         foreach ($f in @(Get-ChildItem $pat -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)) {
             $c = Test-PythonExe $f.FullName
-            if ($c) { $c.Via = '安装目录'; return $c }
+            if ($c) { $c.Via = 'installation directory'; return $c }
         }
     }
-    # 5) 注册表
+    # 5) Registry
     foreach ($hive in @('HKLM:\SOFTWARE\Python\PythonCore',
                         'HKCU:\SOFTWARE\Python\PythonCore',
                         'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore')) {
@@ -112,39 +123,39 @@ function Find-Python {
             $ip = (Get-ItemProperty (Join-Path $k.PSPath 'InstallPath') -ErrorAction SilentlyContinue).'(default)'
             if ($ip) {
                 $c = Test-PythonExe (Join-Path $ip 'python.exe')
-                if ($c) { $c.Via = '注册表'; return $c }
+                if ($c) { $c.Via = 'registry'; return $c }
             }
         }
     }
-    # 6) 随附 / 便携运行时（如 DSH 自带的 Python）
+    # 6) Bundled or portable runtimes, such as the Python distributed with DSH
     foreach ($g in @("$env:USERPROFILE\.dsh\dsh-runtimes\*\dependencies\python\python.exe",
                      "$env:LOCALAPPDATA\dsh\dsh-runtimes\*\dependencies\python\python.exe")) {
         foreach ($f in @(Get-ChildItem $g -ErrorAction SilentlyContinue | Sort-Object FullName -Descending)) {
             $c = Test-PythonExe $f.FullName
-            if ($c) { $c.Via = '随附运行时'; return $c }
+            if ($c) { $c.Via = 'bundled runtime'; return $c }
         }
     }
-    # 7) 现有 venv 的 base（pyvenv.cfg 里的 home）
+    # 7) Base interpreter of the existing venv, from the home entry in pyvenv.cfg
     $cfg = Join-Path $Target 'venv\pyvenv.cfg'
     if (Test-Path $cfg) {
         $line = @(Get-Content $cfg | Where-Object { $_ -match '^\s*home\s*=' })
         if ($line.Count -gt 0) {
             $homePath = (($line[0] -split '=', 2)[1]).Trim()
             $c = Test-PythonExe (Join-Path $homePath 'python.exe')
-            if ($c) { $c.Via = '现有 venv 的 base'; return $c }
+            if ($c) { $c.Via = 'base interpreter of the existing venv'; return $c }
         }
     }
     return $null
 }
 
-# ---------------------------------------------------------------- 头部
+# ---------------------------------------------------------------- Header
 Write-Host ''
 Write-Host '  ============================================' -ForegroundColor White
-Write-Host '   FSD 拦截环境' -ForegroundColor White
+Write-Host '   FSD Intercept Environment' -ForegroundColor White
 Write-Host '   ============================================' -ForegroundColor White
-Write-Host ("   包位置 : {0}" -f $PSScriptRoot) -ForegroundColor DarkGray
-Write-Host ("   安装到 : {0}" -f $Target) -ForegroundColor DarkGray
-if ($Check) { Write-Host '   模式   : 只体检（不改动任何文件）' -ForegroundColor DarkGray }
+Write-Host ("   Package location: {0}" -f $PSScriptRoot) -ForegroundColor DarkGray
+Write-Host ("   Install to: {0}" -f $Target) -ForegroundColor DarkGray
+if ($Check) { Write-Host '   Mode: Check only (no files changed)' -ForegroundColor DarkGray }
 
 $transcript = $null
 if (-not $Check) {
@@ -159,41 +170,41 @@ if (-not $Check) {
 
 try {
 
-# ---------------------------------------------------------------- 0 环境
-Step '0/7' '运行环境'
+# ---------------------------------------------------------------- 0 Environment
+Step '0/7' 'Runtime environment'
 if ($PSVersionTable.PSVersion.Major -lt 5) {
-    Fail ("PowerShell 版本过低：{0}（需 5.1+）" -f $PSVersionTable.PSVersion)
+    Fail ("PowerShell {0} is too old. Version 5.1 or later is required." -f $PSVersionTable.PSVersion)
     exit 1
 }
 Good ("PowerShell {0}" -f $PSVersionTable.PSVersion)
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Fail '需要 64 位 Windows'
+    Fail '64-bit Windows is required'
 } else {
     Good 'Windows x64'
 }
 if (-not (Test-Path (Join-Path $src 'start_all.ps1'))) {
-    Fail "安装源不完整：缺少 $src\start_all.ps1"
-    Fail '请把整个压缩包解压后再运行，不要只拷出安装脚本。'
+    Fail "Installation source is incomplete. Missing file: $src\start_all.ps1"
+    Fail 'Extract the entire archive before running the installer.'
     exit 1
 }
-Good ("安装源完整：app\ 共 {0} 个文件" -f (Get-ChildItem $src -Recurse -File).Count)
+Good ("Installation source is complete ({0} files in app\)" -f (Get-ChildItem $src -Recurse -File).Count)
 
-# ---------------------------------------------------------------- 1 目标
-Step '1/7' '安装目录检查'
+# ---------------------------------------------------------------- 1 Destination
+Step '1/7' 'Installation directory'
 $canonical = 'C:\fsd-mitm'
 if ($Target.TrimEnd('\') -ne $canonical) {
-    Fail ("安装目录必须是 {0}" -f $canonical)
-    Info '项目内约 24 处路径写死（svc\stack.py / tools\supervise_all.py / web\server.py / stop_stack.ps1 …），'
-    Info '换盘需要先逐处改源码，本安装器不做自动改写。'
+    Fail ("The installation directory must be {0}" -f $canonical)
+    Info 'About 24 paths are hard-coded, including in svc\stack.py, tools\supervise_all.py, web\server.py, and stop_stack.ps1.'
+    Info 'Edit those paths before changing the installation drive.'
     exit 2
 }
 $existing = Test-Path (Join-Path $Target 'start_all.ps1')
 if ($existing) {
-    Note "目标目录已有部署：$Target"
-    Info '按覆盖安装处理：覆盖源码，保留 logs\ 与 venv\，payload.json 自动备份。'
-    if ($Check) { Info '（-Check 模式不改动任何文件）' }
+    Note "An existing installation was found at $Target"
+    Info 'Installation replaces source files, keeps logs and venv, and backs up payload.json.'
+    if ($Check) { Info 'Check mode leaves all files unchanged.' }
 } else {
-    Good '目标目录为空或不存在（全新安装）'
+    Good 'Clean installation (destination is empty or does not exist)'
 }
 
 $busy = @()
@@ -201,16 +212,16 @@ foreach ($p in @(443, 4567, 8080, 8899, 8900)) {
     if (Test-Port $p) { $busy += $p }
 }
 if ($busy.Count -gt 0) {
-    Note ("以下端口已有监听：{0}" -f (($busy | Sort-Object) -join ', '))
-    Info '说明有一套实例正在运行。覆盖源码不影响已加载的进程（重启后生效）；'
-    Info '若要先停：C:\fsd-mitm\stop_hotspot.ps1（热点模式）或 C:\fsd-mitm\stop_fsd_all.ps1（路由模式）'
+    Note ("Ports already listening: {0}" -f (($busy | Sort-Object) -join ', '))
+    Info 'An instance may already be running. Restart it to load the updated source files.'
+    Info 'To stop it, run C:\fsd-mitm\stop_hotspot.ps1 (hotspot mode) or C:\fsd-mitm\stop_fsd_all.ps1 (router mode).'
 } else {
-    Good '相关端口空闲（443 / 4567 / 8080 / 8899 / 8900）'
+    Good 'Required ports are available (443 / 4567 / 8080 / 8899 / 8900)'
 }
 
 if ($Check) {
     Write-Host ''
-    Write-Host '  ===== 体检结果（未做任何改动） =====' -ForegroundColor Cyan
+    Write-Host '  ===== Check results (no files changed) =====' -ForegroundColor Cyan
     $items = @(
         @{ N = 'pythonw.exe';       P = (Join-Path $Target 'venv\Scripts\pythonw.exe') },
         @{ N = 'mitmdump.exe';      P = (Join-Path $Target 'venv\Scripts\mitmdump.exe') },
@@ -226,15 +237,17 @@ if ($Check) {
     foreach ($i in $items) {
         if (Test-Path $i.P) { Good $i.N } else { Fail $i.N }
     }
-    # Python 解释器探测：venv 已就绪时不需要系统 Python
-    $venvPywCheck = Join-Path $Target 'venv\Scripts\pythonw.exe'
-    $probe = Find-Python
-    if ($probe) {
-        Good ("Python {0}（来源：{1}）" -f $probe.Version, $probe.Via)
-    } elseif (Test-Path $venvPywCheck) {
-        Good 'Python：venv 已就绪（不依赖系统 Python）'
+    # A working venv can be used without finding another Python installation.
+    if (Test-InstalledVenv (Join-Path $Target 'venv')) {
+        Good 'Python: existing venv passed runtime and dependency checks'
     } else {
-        Fail 'Python 3.10+：未找到（去掉 -Check 后加 -AutoInstallPython 重跑）'
+        Fail 'The venv is missing or unusable'
+        $probe = Find-Python
+        if ($probe) {
+            Good ("Python {0} is available to rebuild the venv ({1})" -f $probe.Version, $probe.Via)
+        } else {
+            Fail 'Python 3.12 or later was not found. Rerun with -AutoInstallPython and without -Check.'
+        }
     }
     $pl = Join-Path $Target 'payload.json'
     if (Test-Path $pl) {
@@ -242,37 +255,37 @@ if ($Check) {
             $txt = (Get-Content -LiteralPath $pl -Raw).Trim()
             $obj = $txt | ConvertFrom-Json
             $n = @($obj.PSObject.Properties).Count
-            Good ("payload.json 合法：{0} 字节 / {1} 字段" -f (Get-Item $pl).Length, $n)
-        } catch { Fail 'payload.json 不是合法 JSON' }
+            Good ("payload.json is valid ({0} bytes, {1} fields)" -f (Get-Item $pl).Length, $n)
+        } catch { Fail 'payload.json is invalid JSON' }
     }
     Write-Host ''
     Write-Host ("  OK={0} WARN={1} FAIL={2}" -f $script:okCount, $script:warnCount, $script:failCount) -ForegroundColor $(if ($script:failCount) { 'Red' } else { 'Green' })
     if ($script:failCount -eq 0) {
-        Write-Host '  依赖齐全，可运行：C:\fsd-mitm\start_all.cmd' -ForegroundColor Green
+        Write-Host '  All dependencies are available. Run C:\fsd-mitm\start_all.cmd to start.' -ForegroundColor Green
     } else {
-        Write-Host '  缺失项在上表，去掉 -Check 重新运行即可补齐。' -ForegroundColor Yellow
+        Write-Host '  Rerun the installer without -Check to install the missing items listed above.' -ForegroundColor Yellow
     }
     exit $(if ($script:failCount) { 1 } else { 0 })
 }
 
-# ---------------------------------------------------------------- 2 复制
-Step '2/7' '复制程序文件'
+# ---------------------------------------------------------------- 2 Copy files
+Step '2/7' 'Copy application files'
 New-Item -ItemType Directory -Path $Target -Force | Out-Null
 $plTarget = Join-Path $Target 'payload.json'
 if (Test-Path $plTarget) {
     $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
     Copy-Item -LiteralPath $plTarget -Destination ("{0}.preinstall-{1}" -f $plTarget, $ts) -Force
-    Info ("已备份原载荷：payload.json.preinstall-{0}" -f $ts)
+    Info ("Backed up the existing payload to payload.json.preinstall-{0}" -f $ts)
 }
 $rc = robocopy $src $Target /E /NFL /NDL /NJH /NJS /NP /XD 'logs' 'venv' 'backup' '__pycache__' /XF '*.pyc'
 if ($LASTEXITCODE -ge 8) {
-    Fail ("robocopy 失败，退出码 {0}" -f $LASTEXITCODE)
+    Fail ("Robocopy failed with exit code {0}" -f $LASTEXITCODE)
     exit 3
 }
-Good ("已复制 {0} 个文件（logs / venv 未被覆盖）" -f (Get-ChildItem $src -Recurse -File).Count)
+Good ("Copied {0} files (preserved logs and venv)" -f (Get-ChildItem $src -Recurse -File).Count)
 
-# PowerShell 5.1 按系统 ANSI 读 .ps1；无 BOM 的中文会变成乱码并触发语法错误。
-# 复制后统一补 UTF-8 BOM，避免 "哈希文本中的键后面缺少 = 运算符" 这类报错。
+# Windows PowerShell 5.1 uses the system ANSI code page for scripts without a BOM.
+# Add a UTF-8 BOM to copied scripts so PowerShell reads their text correctly.
 $bomFixed = 0
 Get-ChildItem -LiteralPath $Target -Recurse -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -notlike "*\venv\*" } |
@@ -287,11 +300,11 @@ Get-ChildItem -LiteralPath $Target -Recurse -Filter '*.ps1' -File -ErrorAction S
             $script:bomFixed++
         }
     }
-if ($bomFixed -gt 0) { Good ("已为 {0} 个 .ps1 补 UTF-8 BOM" -f $bomFixed) }
-else { Good '所有 .ps1 均带 UTF-8 BOM' }
+if ($bomFixed -gt 0) { Good ("Added a UTF-8 BOM to {0} PowerShell scripts" -f $bomFixed) }
+else { Good 'All PowerShell scripts have a UTF-8 BOM' }
 
 # ---------------------------------------------------------------- 3 venv
-Step '3/7' 'Python 虚拟环境'
+Step '3/7' 'Python virtual environment'
 $venvDir = Join-Path $Target 'venv'
 $venvPy  = Join-Path $venvDir 'Scripts\python.exe'
 $venvPyw = Join-Path $venvDir 'Scripts\pythonw.exe'
@@ -299,77 +312,80 @@ $venvMit = Join-Path $venvDir 'Scripts\mitmdump.exe'
 $req     = Join-Path $Target 'requirements.txt'
 
 if ($SkipVenv) {
-    Note '已跳过 venv（-SkipVenv）'
-} elseif ((Test-Path $venvMit) -and (Test-Path $venvPyw)) {
-    Good 'venv 已就绪（mitmdump.exe / pythonw.exe 存在）'
+    Note 'Skipped virtual environment setup (-SkipVenv)'
+} elseif (Test-InstalledVenv $venvDir) {
+    Good 'The existing venv passed runtime and dependency checks'
 } else {
-    if (Test-Path $venvDir) {
-        $bak = "$venvDir.broken-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        Move-Item -LiteralPath $venvDir -Destination $bak -Force
-        Note ("原 venv 不完整，已改名为 {0}" -f (Split-Path $bak -Leaf))
-    }
     $py = Find-Python
     if (-not $py -and $AutoInstallPython) {
-        $winget = Get-Command 'winget' -ErrorAction SilentlyContinue
+        $winget = Get-Command 'winget' -CommandType Application -ErrorAction SilentlyContinue
         if ($winget) {
-            Info '未找到 Python，改用 winget 安装 3.12（会弹 UAC、需要网络）…'
-            & $winget.Source install --id Python.Python.3.12 -e --silent `
+            Info 'Compatible Python was not found. Installing Python 3.12 via WinGet (requires internet access and may prompt for UAC)...'
+            & $winget.Source install --id Python.Python.3.12 -e --source winget --silent `
                 --accept-package-agreements --accept-source-agreements
+            if ($LASTEXITCODE -ne 0) {
+                Note ("WinGet returned exit code {0} while installing Python" -f $LASTEXITCODE)
+            }
             $py = Find-Python
         } else {
-            Note '本机没有 winget，无法自动安装 Python'
+            Note 'WinGet is unavailable for automatic Python installation'
         }
     }
     if (-not $py) {
-        Fail '找不到可用的 Python 3.10+'
-        Info '已尝试：-PythonExe → PATH → py 启动器 → 常见安装目录 → 注册表 → 随附运行时 → 现有 venv 的 base'
-        Info '（PATH 里 WindowsApps\python.exe 是应用商店占位符，已自动跳过，不是真 Python）'
+        Fail 'No compatible Python 3.12 or later with venv and ensurepip was found'
+        Info 'Checked -PythonExe, PATH, the Python launcher, standard installation directories, registry, bundled runtimes, and the existing venv base.'
+        Info 'Skipped WindowsApps\python.exe because it is a Microsoft Store execution alias.'
         Info ''
-        Info '四选一：'
-        Info '  1) 自动装：  .\install.ps1 -AutoInstallPython'
-        Info '  2) 手动装：  winget install Python.Python.3.12'
-        Info '             或 https://www.python.org/downloads/windows/ （勾 Add to PATH）'
-        Info '  3) 指定路径：.\install.ps1 -PythonExe "C:\Path\python.exe"'
-        Info '  4) 免 Python：把另一台机器的 venv 拷到 C:\fsd-mitm\venv（路径必须一致），再 .\install.ps1 -SkipVenv'
+        Info 'Available installation options:'
+        Info '  1) Install automatically: .\install.ps1 -AutoInstallPython'
+        Info '  2) Install manually:      winget install Python.Python.3.12'
+        Info '     Or download from https://www.python.org/downloads/windows/ and select Add to PATH.'
+        Info '  3) Specify an interpreter: .\install.ps1 -PythonExe "C:\Path\python.exe"'
         exit 4
     }
-    Good ("使用 Python {0}（来源：{1}）" -f $py.Version, $py.Via)
-    Info ("解释器：{0} {1}" -f $py.Exe, ($py.Pre -join ' '))
-    Info '创建 venv …'
-    & $py.Exe @($py.Pre) -m venv $venvDir
+    if (Test-Path -LiteralPath $venvDir) {
+        $bak = "$venvDir.broken-$(Get-Date -Format 'yyyyMMdd-HHmmssfff')"
+        try {
+            Move-Item -LiteralPath $venvDir -Destination $bak -ErrorAction Stop
+        } catch {
+            Fail ("Could not back up the existing venv: {0}" -f $_.Exception.Message)
+            exit 4
+        }
+        Note ("Renamed the incomplete venv to {0}" -f (Split-Path $bak -Leaf))
+    }
+    Good ("Using Python {0} ({1})" -f $py.Version, $py.Via)
+    Info ("Interpreter: {0} {1}" -f $py.Exe, ($py.Pre -join ' '))
+    Info 'Creating the venv...'
+    $pythonArgs = $py.Pre
+    & $py.Exe @pythonArgs -I -m venv $venvDir
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPy)) {
-        Fail 'venv 创建失败'
+        Fail 'Could not create the venv'
         exit 4
     }
-    Good 'venv 已创建'
+    Good 'Created the venv'
 
-    $pip = Join-Path $venvDir 'Scripts\pip.exe'
     $pipArgs = @('install', '--disable-pip-version-check', '--no-input', '-r', $req)
     if ($UseMirror) {
         $pipArgs += @('-i', 'https://pypi.tuna.tsinghua.edu.cn/simple',
                       '--trusted-host', 'pypi.tuna.tsinghua.edu.cn')
-        Info 'pip 使用清华镜像'
+        Info 'pip is using the Tsinghua mirror'
     }
-    Info '安装依赖（mitmproxy 12.3.1 / scapy / flask / cryptography），首次约 2–5 分钟 …'
-    if (Test-Path $pip) {
-        & $pip @pipArgs
-    } else {
-        & $venvPy -m pip @pipArgs
-    }
+    Info 'Installing dependencies (mitmproxy 12.3.1, scapy, Flask, and cryptography). First-time setup usually takes 2 to 5 minutes.'
+    & $venvPy -I -m pip @pipArgs
     if ($LASTEXITCODE -ne 0) {
-        Fail ("pip 安装失败（退出码 {0}）" -f $LASTEXITCODE)
-        Info '网络问题可重试：.\install.ps1 -UseMirror -SkipVenv'
+        Fail ("pip install failed with exit code {0}" -f $LASTEXITCODE)
+        Info 'For network issues, retry with .\install.ps1 -UseMirror'
         exit 4
     }
-    if (-not (Test-Path $venvMit)) {
-        Fail '依赖装完但没有 mitmdump.exe，venv 异常'
+    if (-not (Test-InstalledVenv $venvDir)) {
+        Fail 'The venv did not pass its checks after dependency installation'
         exit 4
     }
-    Good '依赖安装完成（mitmdump.exe 就绪）'
+    Good 'Dependencies installed and mitmdump.exe is available'
 }
 
-# ---------------------------------------------------------------- 4 体检
-Step '4/7' '关键文件体检'
+# ---------------------------------------------------------------- 4 Verify files
+Step '4/7' 'Verify required files'
 $checks = @(
     @{ N = 'venv\Scripts\pythonw.exe';   P = $venvPyw },
     @{ N = 'venv\Scripts\mitmdump.exe';  P = $venvMit },
@@ -392,44 +408,44 @@ if (Test-Path $plTarget) {
     try {
         $txt = (Get-Content -LiteralPath $plTarget -Raw).Trim()
         $null = $txt | ConvertFrom-Json
-        Good ("payload.json 合法：{0} 字节" -f (Get-Item $plTarget).Length)
-    } catch { Fail 'payload.json 不是合法 JSON' }
+        Good ("payload.json is valid ({0} bytes)" -f (Get-Item $plTarget).Length)
+    } catch { Fail 'payload.json is invalid JSON' }
 }
 
-# ---------------------------------------------------------------- 5 快捷方式
-Step '5/7' '桌面快捷方式'
+# ---------------------------------------------------------------- 5 Shortcuts
+Step '5/7' 'Desktop shortcuts'
 if ($NoShortcut) {
-    Note '已跳过（-NoShortcut）'
+    Note 'Skipped desktop shortcuts (-NoShortcut)'
 } else {
     try {
         $ws = New-Object -ComObject WScript.Shell
         $desktop = [Environment]::GetFolderPath('Desktop')
 
-        $l1 = $ws.CreateShortcut((Join-Path $desktop 'FSD一键启动.lnk'))
+        $l1 = $ws.CreateShortcut((Join-Path $desktop 'FSD Start.lnk'))
         $l1.TargetPath = Join-Path $Target 'start_hotspot.cmd'
         $l1.WorkingDirectory = $Target
         $l1.IconLocation = 'C:\Windows\System32\shell32.dll,137'
-        $l1.Description = '一键启动 FSD 拦截环境（热点模式：443 拦截 + DNS 劫持 + 看板）'
+        $l1.Description = 'Start the FSD intercept environment in hotspot mode'
         $l1.Save()
 
-        $l2 = $ws.CreateShortcut((Join-Path $desktop 'FSD一键停止.lnk'))
+        $l2 = $ws.CreateShortcut((Join-Path $desktop 'FSD Stop.lnk'))
         $l2.TargetPath = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
         $l2.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $Target 'stop_hotspot.ps1') + '" -NoExit'
         $l2.WorkingDirectory = $Target
         $l2.IconLocation = 'C:\Windows\System32\shell32.dll,131'
-        $l2.Description = '停止 FSD 拦截环境（热点模式三个组件）'
+        $l2.Description = 'Stop the FSD intercept environment in hotspot mode'
         $l2.Save()
 
-        Good 'FSD一键启动 / FSD一键停止 已创建'
+        Good 'Created FSD Start and FSD Stop desktop shortcuts'
     } catch {
-        Fail ("快捷方式创建失败：{0}" -f $_.Exception.Message)
+        Fail ("Could not create a desktop shortcut: {0}" -f $_.Exception.Message)
     }
 }
 
-# ---------------------------------------------------------------- 6 自启
-Step '6/7' '登录自启（看门狗）'
+# ---------------------------------------------------------------- 6 Startup
+Step '6/7' 'Start at login (watchdog)'
 if ($NoAutostart) {
-    Note '已跳过（-NoAutostart）'
+    Note 'Skipped startup registration (-NoAutostart)'
 } else {
     try {
         $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
@@ -438,37 +454,37 @@ if ($NoAutostart) {
                '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
                (Join-Path $Target 'start_hotspot.ps1') + '" -NoFirewall'
         Set-ItemProperty -Path $runKey -Name 'fsd-mitm-supervisor' -Value $val -Type String
-        Good 'HKCU\Run\fsd-mitm-supervisor 已写入（热点模式启动）'
+        Good 'Registered HKCU\Run\fsd-mitm-supervisor for hotspot mode'
     } catch {
-        Fail ("自启写入失败：{0}" -f $_.Exception.Message)
+        Fail ("Could not register startup at login: {0}" -f $_.Exception.Message)
     }
 }
 
-# ---------------------------------------------------------------- 7 启动
-Step '7/7' '启动'
+# ---------------------------------------------------------------- 7 Launch
+Step '7/7' 'Launch'
 if ($NoStart) {
-    Note '已跳过启动（-NoStart）'
+    Note 'Skipped launch (-NoStart)'
 } else {
     if ($script:failCount -gt 0) {
-        Note '前面有 FAIL 项，跳过启动。修好后执行：C:\fsd-mitm\start_hotspot.cmd'
+        Note 'Launch skipped because checks failed. Fix the reported issues, then run C:\fsd-mitm\start_hotspot.cmd.'
     } else {
-        Info '启动中（首次会弹一次 UAC 补防火墙规则，请点“是”）…'
+        Info 'Launching. Select Yes if Windows asks to add firewall rules on first launch.'
         & (Join-Path $Target 'start_hotspot.ps1')
     }
 }
 
-# ---------------------------------------------------------------- 汇总
+# ---------------------------------------------------------------- Summary
 Write-Host ''
 Write-Host '  ============================================' -ForegroundColor White
-Write-Host ("   结果：OK={0} WARN={1} FAIL={2}" -f $script:okCount, $script:warnCount, $script:failCount) -ForegroundColor $(if ($script:failCount) { 'Red' } else { 'Green' })
+Write-Host ("   Result: OK={0} WARN={1} FAIL={2}" -f $script:okCount, $script:warnCount, $script:failCount) -ForegroundColor $(if ($script:failCount) { 'Red' } else { 'Green' })
 Write-Host '  ============================================' -ForegroundColor White
-Write-Host ("   看板      : http://127.0.0.1:8900") -ForegroundColor White
-Write-Host ("   载荷编辑  : http://127.0.0.1:8900/payload") -ForegroundColor White
-Write-Host ("   启动      : {0}\start_hotspot.cmd   （热点模式）" -f $Target) -ForegroundColor DarkGray
-Write-Host ("   状态      : powershell -File {0}\start_hotspot.ps1 -Status" -f $Target) -ForegroundColor DarkGray
-Write-Host ("   停止      : powershell -File {0}\stop_hotspot.ps1" -f $Target) -ForegroundColor DarkGray
-Write-Host ("   路由模式  : {0}\start_all.cmd（车机与电脑连同一路由器时用）" -f $Target) -ForegroundColor DarkGray
-Write-Host ("   只撤拦截  : powershell -File {0}\stop_api_intercept.ps1" -f $Target) -ForegroundColor DarkGray
+Write-Host '   Dashboard       : http://127.0.0.1:8900' -ForegroundColor White
+Write-Host '   Payload editor  : http://127.0.0.1:8900/payload' -ForegroundColor White
+Write-Host ("   Start           : {0}\start_hotspot.cmd (hotspot mode)" -f $Target) -ForegroundColor DarkGray
+Write-Host ("   Status          : powershell -File {0}\start_hotspot.ps1 -Status" -f $Target) -ForegroundColor DarkGray
+Write-Host ("   Stop            : powershell -File {0}\stop_hotspot.ps1" -f $Target) -ForegroundColor DarkGray
+Write-Host ("   Router mode     : {0}\start_all.cmd (vehicle and computer on the same router)" -f $Target) -ForegroundColor DarkGray
+Write-Host ("   Stop intercept  : powershell -File {0}\stop_api_intercept.ps1" -f $Target) -ForegroundColor DarkGray
 Write-Host ''
 
 } finally {

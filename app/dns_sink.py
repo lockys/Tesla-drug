@@ -1,14 +1,14 @@
 """
-dns_sink.py — 极简 DNS：把指定域名解析到本机，其余查询原样转发上游。
+dns_sink.py - Minimal DNS server that resolves selected domains locally and forwards all other queries unchanged.
 
-用途：让车机把 mothership.vn.teslamotors.com 解析到跑 mitmproxy 的这台 PC，
-      这样车机的 HTTP:4567 请求直接落到本机 reverse 模式的 mitmproxy 上。
+The vehicle resolves mothership.vn.teslamotors.com to the PC running mitmproxy,
+so its HTTP requests on port 4567 reach the local reverse proxy.
 
     python dns_sink.py --ip 192.168.137.1 --redirect mothership.vn.teslamotors.com
     python dns_sink.py --ip 192.168.1.23 --upstream 223.5.5.5 --port 53
 
-不监听 53 也可以（--port 5353），车机只能填 IP 不带端口，所以正式用还是 53。
-Windows 非管理员也能绑 UDP 53。
+Use --port 5353 for testing. The vehicle accepts only an IP address, so use port 53 for deployment.
+On Windows, binding UDP port 53 does not require administrator privileges.
 """
 
 from __future__ import annotations
@@ -25,11 +25,11 @@ LOG_LOCK = threading.Lock()
 
 
 def local_ip_for(peer_ip: str) -> str | None:
-    """返回"客户端能回连到的那张网卡 IP"。
+    """Return the local interface IP that the client can reach.
 
-    路线 B（PC 移动热点）时，车机在 192.168.137.0/24，本机上行是 F50 的
-    192.168.199.x；固定用启动时的 IP 会让车机拿到一个不在自己网段的地址。
-    这里按对端地址反查本机出口 IP，热点/局域网/回环都自动正确。
+    In Windows hotspot mode, the vehicle is on 192.168.137.0/24, while the PC
+    uses 192.168.199.x upstream. Using a fixed startup IP can return the wrong subnet.
+    Use the peer address to select the local interface for hotspot, LAN, or loopback traffic.
     """
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -132,7 +132,7 @@ class DnsSink:
                 answer_ip = local_ip_for(peer[0]) or self.ip
                 if qtype == 1:  # A
                     reply = build_answer(data, qend, answer_ip)
-                elif qtype == 28:  # AAAA -> 空，逼它用 A
+                elif qtype == 28:  # Return an empty AAAA answer so the client uses an A query.
                     reply = build_empty(data, qend)
                 else:
                     reply = build_empty(data, qend)
@@ -161,12 +161,12 @@ class DnsSink:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ip", required=True, help="重定向到的本机 IP（车机能访问到的那个）")
-    ap.add_argument("--redirect", action="append", default=None, help="要劫持的域名，可重复")
-    ap.add_argument("--upstream", default=None, help="上游 DNS，逗号分隔，默认 223.5.5.5,1.1.1.1")
+    ap.add_argument("--ip", required=True, help="Local IP address reachable by the vehicle")
+    ap.add_argument("--redirect", action="append", default=None, help="Domain to redirect (repeatable)")
+    ap.add_argument("--upstream", default=None, help="Comma-separated upstream DNS servers (default: 223.5.5.5,1.1.1.1)")
     ap.add_argument("--port", type=int, default=53)
     ap.add_argument("--log", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "dns.jsonl"))
-    ap.add_argument("--no-forward", action="store_true", help="非劫持域名一律 NXDOMAIN（不建议）")
+    ap.add_argument("--no-forward", action="store_true", help="Return NXDOMAIN for every domain outside the redirect list")
     args = ap.parse_args()
 
     redirect = {d.rstrip(".").lower() for d in (args.redirect or ["mothership.vn.teslamotors.com"])}

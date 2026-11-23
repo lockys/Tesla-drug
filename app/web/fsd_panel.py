@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""fsd_panel.py — FSD 拦截实况看板（纯服务端渲染，无 JavaScript，默认 127.0.0.1:8900）
+"""fsd_panel.py — Live FSD interception dashboard (server-rendered, no JavaScript, defaults to 127.0.0.1:8900)
 
-设计要点：
-  * 页面不含任何 <script>：老浏览器（IE/旧 Edge）不会弹"脚本错误"对话框
-  * 用 <meta http-equiv="refresh" content="2"> 自动刷新，2 秒一次
-  * 只读 logs\ 下的证据文件，不改任何配置
+Design notes:
+  * The page omits scripts to avoid script error dialogs in IE and legacy Edge.
+  * The page refreshes every two seconds using <meta http-equiv="refresh" content="2">.
+  * The dashboard reads activity records from the logs directory.
 
   python web\fsd_panel.py --port 8900
 """
@@ -23,6 +23,7 @@ from collections import Counter
 from datetime import datetime
 
 from flask import Flask, Response, jsonify, request
+from api_activity import recent_api_activity
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOGS = os.path.join(ROOT, "logs")
@@ -30,7 +31,7 @@ HITS = os.path.join(LOGS, "hits.jsonl")
 DNS = os.path.join(LOGS, "dns.jsonl")
 ARP = os.path.join(LOGS, "arp_mitm.log")
 HSLOG = os.path.join(LOGS, "handshake.log")
-CARREC = os.path.join(LOGS, "car_recent.jsonl")   # 车机请求滚动缓存（最多 999 条）
+CARREC = os.path.join(LOGS, "car_recent.jsonl")   # Rolling cache of up to 999 vehicle requests
 CAR_CAP = 999
 PAYLOAD = os.path.join(ROOT, "payload.json")
 CAR_IP = "192.168.199.95"
@@ -39,7 +40,7 @@ LOCAL_IPS = {"127.0.0.1", "192.168.199.148", "192.168.137.1"}
 
 app = Flask(__name__)
 
-# Windows: 子进程不要新开控制台窗口（否则每次刷新都会闪一个cmd黑框）
+# Windows: Hide subprocess consoles to avoid a visible window on every refresh.
 _NO_WIN = 0x08000000 if os.name == "nt" else 0
 _CONN_CACHE = {"ts": 0.0, "rows": []}
 
@@ -65,7 +66,7 @@ def _compact(obj) -> bytes:
 
 
 def _save_payload(data: bytes, source: str = "") -> None:
-    """写 payload.json 前先留一份 .bak，并记一条配置变更历史。"""
+    """Back up payload.json before writing and record the configuration change."""
     prev_md5 = ""
     try:
         with open(PAYLOAD, "rb") as src:
@@ -153,16 +154,16 @@ def config_page():
         try:
             data = _compact(obj)
             if len(data) > 8192:
-                raise ValueError("载荷过大")
+                raise ValueError("Payload is too large")
             stale = bool(rev) and rev != _payload_info()["md5"]
             _save_payload(data, source="config")
-            msg = "<span class='ok'>已保存并生效</span>：%d 字节 / md5 %s" % (len(data), hashlib.md5(data).hexdigest())
+            msg = "<span class='ok'>Saved and applied</span>: %d bytes / MD5 %s" % (len(data), hashlib.md5(data).hexdigest())
             if stale:
-                msg += ("<div class='meta'><span class='bad'>⚠ 提交的页面已过期</span>："
-                        "打开页面后文件被别的操作改过，本次保存以页面内容为准，旧内容已存入 payload.json.bak</div>")
+                msg += ("<div class='meta'><span class='bad'>⚠ The submitted page is out of date</span>:"
+                        "The file changed after this page loaded. The submitted content was saved and the previous content was backed up to payload.json.bak.</div>")
                 log_config_change(rev, "config-stale")
         except Exception as exc:  # noqa: BLE001
-            msg = "<span class='bad'>保存失败：%s</span>" % html.escape(str(exc))
+            msg = "<span class='bad'>Save failed: %s</span>" % html.escape(str(exc))
 
     info = _payload_info()
     rows = []
@@ -172,24 +173,24 @@ def config_page():
                     "<input type='hidden' name='name' value='%s'></td></tr>" % (
                         html.escape(k), html.escape(val), html.escape(k)))
     for _ in range(2):
-        rows.append("<tr><td><input type='text' name='new_name' placeholder='新字段名'></td>"
-                    "<td><input type='text' name='new_value' placeholder='true / false / 字符串'></td></tr>")
+        rows.append("<tr><td><input type='text' name='new_name' placeholder='New field name'></td>"
+                    "<td><input type='text' name='new_value' placeholder='true / false / text'></td></tr>")
     match = (info["bytes"] == CANON_BYTES and info["md5"] == CANON_MD5)
-    badge = ("<span class='ok'>与官方 282B 一致</span>" if match
-             else "<span class='bad'>非官方载荷（%d 字节 / %s）</span>" % (info["bytes"], info["md5"]))
+    badge = ("<span class='ok'>Matches official 282-byte payload</span>" if match
+             else "<span class='bad'>Custom payload (%d bytes / %s)</span>" % (info["bytes"], info["md5"]))
     return Response(
-        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
-        "<meta http-equiv='X-UA-Compatible' content='IE=edge'><title>填写配置</title>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta http-equiv='X-UA-Compatible' content='IE=edge'><title>Edit configuration</title>"
         "<style>" + FIELD_CSS + "</style></head><body><div class='wrap'>"
-        "<h1>填写下发配置</h1>"
-        "<div class='meta'>当前：%d 字节 / md5 <code>%s</code> / %d 个字段 —— %s</div>%s"
+        "<h1>Edit response configuration</h1>"
+        "<div class='meta'>Current: %d bytes / MD5 <code>%s</code> / %d fields — %s</div>%s"
         "<form method='post'><input type='hidden' name='_rev' value='%s'><table>"
-        "<thead><tr><th style='width:42%%'>字段名</th><th>值</th></tr></thead>"
+        "<thead><tr><th style='width:42%%'>Field name</th><th>Value</th></tr></thead>"
         "<tbody>%s</tbody></table>"
-        "<button type='submit'>保存并下发</button></form>"
-        "<div class='meta'>值填 <code>true</code>/<code>false</code> 会按布尔发送，其它按字符串；"
-        "保存后 <code>fsd_mock</code> 热加载，车机下一次请求即用新配置。</div>"
-        "<div class='meta'><a href='/'>← 返回看板</a>　<a href='/payload'>JSON 原文编辑</a></div>"
+        "<button type='submit'>Save and apply</button></form>"
+        "<div class='meta'>Enter <code>true</code> or <code>false</code> for a boolean. Other values are sent as strings. "
+        "After you save, <code>fsd_mock</code> reloads the configuration on the next vehicle request.</div>"
+        "<div class='meta'><a href='/'>← Back to dashboard</a> · <a href='/payload'>Edit raw JSON</a></div>"
         "</div></body></html>" % (
             info["bytes"], info["md5"], info["fields"], badge, msg, info["md5"], "".join(rows)),
         mimetype="text/html; charset=utf-8")
@@ -202,31 +203,31 @@ def payload_page():
         try:
             obj = json.loads(raw)
             if not isinstance(obj, dict):
-                raise ValueError("顶层必须是 JSON 对象")
+                raise ValueError("The top-level value must be a JSON object")
             data = _compact(obj)
             if len(data) > 8192:
-                raise ValueError("载荷过大")
+                raise ValueError("Payload is too large")
             _save_payload(data, source="payload")
-            msg = "<span class='ok'>已保存</span>：%d 字节 / md5 %s" % (len(data), hashlib.md5(data).hexdigest())
+            msg = "<span class='ok'>Saved</span>: %d bytes / MD5 %s" % (len(data), hashlib.md5(data).hexdigest())
         except Exception as exc:  # noqa: BLE001
-            msg = "<span class='bad'>保存失败：" + html.escape(str(exc)) + "</span>"
+            msg = "<span class='bad'>Save failed: " + html.escape(str(exc)) + "</span>"
 
     info = _payload_info()
     pretty = json.dumps(info["json"], ensure_ascii=False, indent=2)
     match = (info["bytes"] == CANON_BYTES and info["md5"] == CANON_MD5)
-    badge = "<span class='ok'>与官方 282B 载荷一致</span>" if match else \
-            "<span class='bad'>与官方 282B 不一致（%d 字节 / %s）</span>" % (info["bytes"], info["md5"])
+    badge = "<span class='ok'>Matches official 282-byte payload</span>" if match else \
+            "<span class='bad'>Differs from official 282-byte payload (%d bytes / %s)</span>" % (info["bytes"], info["md5"])
     return Response(
-        "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta http-equiv='X-UA-Compatible' content='IE=edge'>"
-        "<title>下发字段编辑</title><style>" + FORM_CSS + "</style></head><body><div class='wrap'>"
-        "<h1>下发字段（payload.json）</h1>"
-        "<div class='meta'>当前：%d 字节 / md5 <code>%s</code> / 字段 %d 个 —— %s</div>%s"
+        "<title>Edit response fields</title><style>" + FORM_CSS + "</style></head><body><div class='wrap'>"
+        "<h1>Response fields (payload.json)</h1>"
+        "<div class='meta'>Current: %d bytes / MD5 <code>%s</code> / %d fields — %s</div>%s"
         "<form method='post'><textarea name='json'>%s</textarea>"
-        "<div class='meta'>保存时自动压成单行 compact JSON（键顺序保持你在文本里的顺序，md5 会随顺序变）</div>"
-        "<button type='submit'>保存并生效</button>"
-        "<a href='/'>返回看板</a></form>"
-        "<div class='meta'>生效方式：fsd_mock 热加载，车机下一次请求即用新载荷；不需要重启任何进程。</div>"
+        "<div class='meta'>Saving compacts the JSON to one line and preserves key order. Changing the order changes the MD5 hash.</div>"
+        "<button type='submit'>Save and apply</button>"
+        "<a href='/'>Back to dashboard</a></form>"
+        "<div class='meta'>fsd_mock loads the new payload on the next vehicle request without a restart.</div>"
         "</div></body></html>" % (
             info["bytes"], info["md5"], info["fields"], badge, msg, html.escape(pretty)),
         mimetype="text/html; charset=utf-8")
@@ -312,7 +313,7 @@ _PING_CACHE = {"ts": 0.0, "ok": False}
 
 
 def _l2_alive(ip: str) -> bool:
-    """车机在二层是否可达（ping 一次，缓存 10 秒；子进程不开窗口）。"""
+    """Check vehicle reachability with one ping and cache it for 10 seconds. Hide the subprocess window."""
     now = time.time()
     if now - _PING_CACHE["ts"] < 10:
         return _PING_CACHE["ok"]
@@ -329,7 +330,7 @@ def _l2_alive(ip: str) -> bool:
     return ok
 
 def _maintain_car_recent() -> None:
-    """把 hits.jsonl 里车机来源的请求回写到滚动文件，最多保留 999 条。"""
+    """Copy vehicle requests from hits.jsonl into a rolling log that retains up to 999 entries."""
     try:
         if os.path.exists(CARREC) and os.path.getmtime(HITS) <= os.path.getmtime(CARREC):
             return
@@ -402,7 +403,7 @@ def _hit_age(intercepts: list) -> int | None:
         return None
 
 
-def build_state() -> dict:
+def build_state(show_api_activity: bool = False) -> dict:
     _maintain_car_recent()
     hits = _tail(HITS)
     dns = _tail(DNS, 20000)
@@ -443,6 +444,8 @@ def build_state() -> dict:
         "recent_cap": CAR_CAP,
         "paths": paths.most_common(12),
         "dns_api": len(apidns), "dns_redirect": len(redirects),
+        **({"api_activity": recent_api_activity(dns, hits, LOCAL_IPS | {"::1"})}
+           if show_api_activity else {}),
         "payload": payload,
         "car_status": car_state(hits, dns),
         "config_history": _config_history(),
@@ -497,12 +500,27 @@ def esc(v) -> str:
     return html.escape("" if v is None else str(v))
 
 
-def render() -> str:
-    s = build_state()
+def render(show_api_activity: bool = False) -> str:
+    s = build_state(show_api_activity)
+    api_activity = (
+        '<section><h2>api-prd activity</h2>'
+        '<p><a href="/">Hide api-prd activity</a></p>'
+        '<p class="dim">DNS shows the domain queried. HTTP shows the recorded URL without query parameters.</p>'
+        '<table><thead><tr><th>Time</th><th>Source</th><th>Client</th><th>Domain or URL</th>'
+        '</tr></thead><tbody>'
+        + ("".join(
+            '<tr><td>%s</td><td>%s</td><td>%s</td><td style="word-break:break-all"><code>%s</code></td></tr>'
+            % tuple(esc(row[field]) for field in ("ts", "source", "client", "destination"))
+            for row in s["api_activity"]
+        ) or '<tr><td colspan="4" class="dim">No api-prd activity in the recent logs.</td></tr>')
+        + '</tbody></table></section>'
+        if show_api_activity else
+        '<section><h2>api-prd activity</h2><p><a href="/?api_prd=1">Show api-prd activity</a></p></section>'
+    )
     p = s["payload"]
-    hs = "握手：TLS1.3 + HTTP/2 已建立" if s["http2"] else ("握手：TLS 已建立" if s["tls"] else "握手：未建立")
+    hs = "Handshake: TLS 1.3 and HTTP/2 established" if s["http2"] else ("Handshake: TLS established" if s["tls"] else "Handshake: Not established")
     hs_cls = "ok" if s["tls"] else "dim"
-    lk = ("连接：%d 条 Established" % s["live_conn"]) if s["live_conn"] else "连接：无"
+    lk = ("Connections: %d established" % s["live_conn"]) if s["live_conn"] else "Connections: None"
     lk_cls = "ok" if s["live_conn"] else "dim"
 
     timeline = []
@@ -513,7 +531,7 @@ def render() -> str:
         if not r.get("bytes"):
             continue
         md5 = r.get("md5")
-        if md5 and md5 == last_md5:      # 内容相同的连续保存只留一条，去掉重复点击噪声
+        if md5 and md5 == last_md5:      # Keep only one entry for consecutive saves of identical content.
             continue
         last_md5 = md5
         timeline.append((r.get("ts") or "", "cfg", r))
@@ -523,7 +541,7 @@ def render() -> str:
     for ts, kind, r in timeline[:20]:
         if kind == "hit":
             int_rows.append(
-                "<tr><td>%s</td><td><span class=\"badge b-hit\">车机取配置</span> %s</td>"
+                "<tr><td>%s</td><td><span class=\"badge b-hit\">Vehicle fetched configuration</span> %s</td>"
                 "<td><code>%s</code></td><td><code>%s</code><br>%s B</td>"
                 "<td class=\"ok\">%s B / %s</td><td><code>%s</code></td><td>%s</td></tr>" % (
                     esc(ts), esc(r.get("method")), esc(r.get("vin")),
@@ -532,15 +550,15 @@ def render() -> str:
                     esc((r.get("md5") or "")[:14]) + "...", esc(r.get("http_version"))))
         else:
             int_rows.append(
-                "<tr><td>%s</td><td><span class=\"badge b-flow\">配置变更</span> %s</td>"
-                "<td>%s 字段</td><td>—</td><td>%s B</td>"
-                "<td><code>%s</code></td><td>本地保存</td></tr>" % (
+                "<tr><td>%s</td><td><span class=\"badge b-flow\">Configuration change</span> %s</td>"
+                "<td>%s fields</td><td>—</td><td>%s B</td>"
+                "<td><code>%s</code></td><td>Saved locally</td></tr>" % (
                     esc(ts), esc(r.get("source")), esc(r.get("fields")),
                     esc(r.get("bytes")), esc((r.get("md5") or "")[:14]) + "..."))
     if not int_rows:
-        int_rows = ["<tr><td colspan=\"7\" class=\"dim\">还没有记录</td></tr>"]
+        int_rows = ["<tr><td colspan=\"7\" class=\"dim\">No records yet</td></tr>"]
 
-    # 最近请求：按「方法+路径（去查询串）」把连续重复项折叠成一条，避免一屏全是 vault_metadata
+    # Group consecutive requests by method and path, ignoring the query string.
     collapsed = []
     for r in s["recent"][-40:]:
         url = r.get("url") or ""
@@ -566,7 +584,7 @@ def render() -> str:
                 esc(c["ts"]), esc(c["method"]), esc(c["path"]), esc(c["query"]),
                 esc(times), cls, esc(c["kind"])))
     if not rec_rows:
-        rec_rows = ["<tr><td colspan=\"5\" class=\"dim\">还没有车机请求</td></tr>"]
+        rec_rows = ["<tr><td colspan=\"5\" class=\"dim\">No vehicle requests yet</td></tr>"]
 
     path_rows = ["<tr><td><code>%s</code></td><td>%d</td></tr>" % (esc(k), v) for k, v in s["paths"]] or \
                 ["<tr><td colspan=\"2\" class=\"dim\">-</td></tr>"]
@@ -577,22 +595,22 @@ def render() -> str:
             esc(r.get("ts")), esc(r.get("source")), esc(r.get("bytes")),
             esc((r.get("md5") or "")[:14]) + "...", esc(r.get("fields"))))
     if not cfg_rows:
-        cfg_rows = ["<tr><td colspan=\"5\" class=\"dim\">还没有配置变更记录</td></tr>"]
+        cfg_rows = ["<tr><td colspan=\"5\" class=\"dim\">No configuration changes yet</td></tr>"]
 
     a = s["arp"]
     last_int = s["intercepts"][-1]["ts"] if s["intercepts"] else "—"
     cs = s["car_status"]
     cs_card_cls = "ok" if cs["online"] else ("warn" if cs.get("l2") else "bad")
-    cs_label = ("车机状态（在线）" if cs["online"]
-                else ("车机状态（链路可达）" if cs.get("l2") else "车机状态（离线）"))
+    cs_label = ("Vehicle status (online)" if cs["online"]
+                else ("Vehicle status (reachable)" if cs.get("l2") else "Vehicle status (offline)"))
     if cs["online"]:
-        cs_html = '<span class="ok">在线</span> · %d 秒前有请求' % cs["idle"]
+        cs_html = '<span class="ok">Online</span> · Last request %d s ago' % cs["idle"]
     elif cs.get("l2"):
-        cs_html = '<span class="warn">链路可达</span> · 无请求，最后 %s' % (cs["last"] or "无记录")
+        cs_html = '<span class="warn">Reachable</span> · No recent requests. Last seen: %s' % (cs["last"] or "No record")
     else:
-        cs_html = '<span class="bad">离线</span> · 最后活动 %s' % (cs["last"] or "无记录")
+        cs_html = '<span class="bad">Offline</span> · Last activity: %s' % (cs["last"] or "No record")
 
-    # ---- 车机连接 & 握手区块 ----
+    # ---- Vehicle connection and handshakes ----
     hs_list = s["handshakes"]
     car_conns = s["car_conns"]
     last_hs = None
@@ -601,21 +619,21 @@ def render() -> str:
             last_hs = h
             break
     hs_live = bool(last_hs and last_hs["age"] is not None and last_hs["age"] <= 3)
-    hs_age_txt = ("%d 秒前" % last_hs["age"]) if (last_hs and last_hs["age"] is not None) else "无记录"
+    hs_age_txt = ("%d s ago" % last_hs["age"]) if (last_hs and last_hs["age"] is not None) else "No record"
     hs_time = (last_hs["ts"][11:19] if last_hs and last_hs.get("ts") else "—")
-    conn_txt = ("已连接 · %d 条 Established" % len(car_conns)) if car_conns else "无活动连接"
+    conn_txt = ("Connected · %d established" % len(car_conns)) if car_conns else "No active connections"
     conn_cls = "ok" if car_conns else "dim"
-    live_txt = ("有 · %s" % hs_age_txt) if hs_live else "无"
+    live_txt = ("Yes · %s" % hs_age_txt) if hs_live else "No"
     live_cls = "ok" if hs_live else "dim"
 
     hs_rows = []
     for h in reversed(hs_list[-8:]):
         ev = h["event"] or ""
         if ev == "handshake_ok":
-            badge = "<span class=\"badge b-hit\">握手成功</span>"
+            badge = "<span class=\"badge b-hit\">Handshake succeeded</span>"
             detail = "%s / %s" % (esc(h["tls"] or "-"), esc(h["cipher"] or "-"))
         elif ev == "handshake_failed":
-            badge = "<span class=\"badge\" style=\"color:#f85149;border-color:#f85149\">握手失败</span>"
+            badge = "<span class=\"badge\" style=\"color:#f85149;border-color:#f85149\">Handshake failed</span>"
             detail = esc(h["error"] or "-")
         else:
             badge = "<span class=\"badge b-flow\">ClientHello</span>"
@@ -626,32 +644,32 @@ def render() -> str:
                 esc((h["ts"] or "")[11:19]), badge, esc((h["client"] or "")[:22]),
                 esc(h["sni"] or "-"), esc(h["first_request"] or "-"), detail))
     if not hs_rows:
-        hs_rows = ["<tr><td colspan=\"6\" class=\"dim\">还没有握手记录（车机尚未发起连接）</td></tr>"]
+        hs_rows = ["<tr><td colspan=\"6\" class=\"dim\">No handshakes yet. The vehicle has not initiated a connection.</td></tr>"]
 
     hs_html = (
-        "<section><h2>车机连接 &amp; 握手（页面每 2 秒刷新，绿色=最近 3 秒内的握手）</h2>"
+        "<section><h2>Vehicle connection and handshakes (refreshes every 2 s; green indicates a handshake in the last 3 s)</h2>"
         "<div class=\"grid\" style=\"padding:12px 12px 0\">"
-        "<div class=\"card\"><div class=\"k\">连接状态</div><div class=\"v s %s\">%s</div></div>"
-        "<div class=\"card\"><div class=\"k\">最后握手时间</div><div class=\"v s\">%s <span class=\"dim\">（%s）</span></div></div>"
-        "<div class=\"card\"><div class=\"k\">最近 3 秒内握手</div><div class=\"v s %s\">%s</div></div>"
+        "<div class=\"card\"><div class=\"k\">Connection status</div><div class=\"v s %s\">%s</div></div>"
+        "<div class=\"card\"><div class=\"k\">Last handshake</div><div class=\"v s\">%s <span class=\"dim\">(%s)</span></div></div>"
+        "<div class=\"card\"><div class=\"k\">Handshake in the last 3 s</div><div class=\"v s %s\">%s</div></div>"
         "</div>"
-        "<table><thead><tr><th>时间</th><th>事件</th><th>客户端</th><th>SNI</th><th>第一条请求</th><th>TLS / 详情</th></tr></thead>"
+        "<table><thead><tr><th>Time</th><th>Event</th><th>Client</th><th>SNI</th><th>First request</th><th>TLS / Details</th></tr></thead>"
         "<tbody>%s</tbody></table></section>" % (
             conn_cls, conn_txt, hs_time, hs_age_txt, live_cls, live_txt, "".join(hs_rows)))
 
-    # ---- 最后下发 + 成功后 20 秒烟花 ----
+    # ---- Latest successful response and 20-second fireworks ----
     hit_age = s["last_hit_age"]
     if hit_age is None:
         hit_txt = "—"
         hit_cls = "dim"
     elif hit_age < 60:
-        hit_txt = "刚刚（%d 秒前）" % hit_age
+        hit_txt = "Just now (%d s ago)" % hit_age
         hit_cls = "ok"
     elif hit_age < 3600:
-        hit_txt = "%d 分钟前" % (hit_age // 60)
+        hit_txt = "%d min ago" % (hit_age // 60)
         hit_cls = "ok"
     else:
-        hit_txt = "%d 小时前" % (hit_age // 3600)
+        hit_txt = "%d h ago" % (hit_age // 3600)
         hit_cls = "dim"
 
     fx_overlay = ""
@@ -663,47 +681,47 @@ def render() -> str:
                                 (70, .9), (82, 1.5), (93, .6)))
         fx_overlay = (
             "<div class=\"fx\">"
-            "<div class=\"banner\">🎆 下发成功 🎆</div>"
+            "<div class=\"banner\">🎆 Response sent 🎆</div>"
             "<div class=\"sub\">feature_configuration · %s B · md5 %s…</div>%s</div>" % (
                 esc(s["last_hit_bytes"]), esc((s["last_hit_md5"] or "")[:12]), flames))
 
     out = (
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
         "<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge\">"
         "<meta http-equiv=\"refresh\" content=\"2\">"
-        "<title>FSD 拦截实况</title><style>" + CSS + "</style></head><body>"
-        "<header><h1>FSD 拦截实况</h1>"
+        "<title>Live FSD Interception</title><style>" + CSS + "</style></head><body>"
+        "<header><h1>Live FSD Interception</h1>"
         "<a href=\"/config\" style=\"color:#1f6feb;font-weight:600;text-decoration:none;"
-        "border:1px solid #1f6feb;padding:3px 10px;border-radius:6px\">填写配置</a>"
+        "border:1px solid #1f6feb;padding:3px 10px;border-radius:6px\">Edit configuration</a>"
         "<span class=\"badge " + hs_cls + "\">" + hs + "</span>"
         "<span class=\"badge " + lk_cls + "\">" + lk + "</span>"
         "<span class=\"dim\">" + esc(s["now"]) + "</span></header>" +
         fx_overlay +
         "<div class=\"wrap\"><div class=\"grid\">"
-        "<div class=\"card\"><div class=\"k\">拦截次数 feature_configuration</div><div class=\"v ok\">%d</div></div>" % len(s["intercepts"]) +
-        "<div class=\"card\"><div class=\"k\">最后拦截时间</div><div class=\"v s\">" + esc(last_int) + "</div></div>"
-        "<div class=\"card\"><div class=\"k\">车机 VIN</div><div class=\"v s\"><code>" + esc(s["vin"]) + "</code></div></div>"
-        "<div class=\"card\"><div class=\"k\">当前载荷（下次生效）</div><div class=\"v s\">%d B / md5 %s...</div></div>" % (p["bytes"], esc(p["md5"][:10])) +
+        "<div class=\"card\"><div class=\"k\">Intercepted feature_configuration requests</div><div class=\"v ok\">%d</div></div>" % len(s["intercepts"]) +
+        "<div class=\"card\"><div class=\"k\">Last intercepted request</div><div class=\"v s\">" + esc(last_int) + "</div></div>"
+        "<div class=\"card\"><div class=\"k\">Vehicle VIN</div><div class=\"v s\"><code>" + esc(s["vin"]) + "</code></div></div>"
+        "<div class=\"card\"><div class=\"k\">Current payload (next request)</div><div class=\"v s\">%d B / md5 %s...</div></div>" % (p["bytes"], esc(p["md5"][:10])) +
         "<div class=\"card " + cs_card_cls + "\"><div class=\"k " + cs_card_cls + "\">" + cs_label + "</div>"
         "<div class=\"v s\">__CARST__</div></div>"
-        "<div class=\"card " + hit_cls + "\"><div class=\"k " + hit_cls + "\">最后下发成功</div><div class=\"v s\">" + hit_txt + "</div></div>" +
-        "<div class=\"card\"><div class=\"k\">车机请求总数</div><div class=\"v\">%d</div></div>" +
-        "<div class=\"card\"><div class=\"k\">api-prd DNS 重定向</div><div class=\"v s\">%d / %d 次查询</div></div>" % (s["dns_redirect"], s["dns_api"]) +
-        "</div>" + hs_html +
-        "<section><h2>下发时间线（配置变更 → 车机取配置）</h2><table><thead><tr>"
-        "<th>时间</th><th>类型</th><th>VIN / 字段</th><th>车机上送</th><th>回包</th><th>md5</th><th>链路</th>"
+        "<div class=\"card " + hit_cls + "\"><div class=\"k " + hit_cls + "\">Last successful response</div><div class=\"v s\">" + hit_txt + "</div></div>" +
+        "<div class=\"card\"><div class=\"k\">Total vehicle requests</div><div class=\"v\">%d</div></div>" +
+        "<div class=\"card\"><div class=\"k\">api-prd DNS redirects</div><div class=\"v s\">%d / %d queries</div></div>" % (s["dns_redirect"], s["dns_api"]) +
+        "</div>" + api_activity + hs_html +
+        "<section><h2>Response timeline (configuration change to vehicle request)</h2><table><thead><tr>"
+        "<th>Time</th><th>Type</th><th>VIN / Fields</th><th>Vehicle request</th><th>Response</th><th>md5</th><th>Link</th>"
         "</tr></thead><tbody>" + "".join(int_rows) + "</tbody></table></section>"
-        "<section><h2>车机最近请求</h2><table><thead><tr><th>时间</th><th>方法</th><th>路径</th><th>重复</th><th>类型</th></tr></thead>"
+        "<section><h2>Recent vehicle requests</h2><table><thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Repeats</th><th>Type</th></tr></thead>"
         "<tbody>" + "".join(rec_rows) + "</tbody></table></section>"
-        "<section><h2>接口调用分布</h2><table><thead><tr><th>接口</th><th>次数</th></tr></thead><tbody>" +
+        "<section><h2>Requests by endpoint</h2><table><thead><tr><th>Endpoint</th><th>Count</th></tr></thead><tbody>" +
         "".join(path_rows) + "</tbody></table></section>"
-        "<section><h2>配置变更记录（谁在什么时候改了下发字段）</h2><table><thead><tr>"
-        "<th>时间</th><th>来源</th><th>字节</th><th>md5</th><th>字段数</th></tr></thead><tbody>" +
+        "<section><h2>Configuration change history</h2><table><thead><tr>"
+        "<th>Time</th><th>Source</th><th>Bytes</th><th>md5</th><th>Fields</th></tr></thead><tbody>" +
         "".join(cfg_rows) + "</tbody></table></section>"
-        "<section><h2>当前回包载荷 · <code>" + esc(p["md5"]) + "</code></h2><pre>" +
+        "<section><h2>Current response payload · <code>" + esc(p["md5"]) + "</code></h2><pre>" +
         esc(json.dumps(p["json"], ensure_ascii=False, indent=2)) + "</pre></section>"
-        "<section><h2>链路计数（ARP 引流）</h2><table><thead><tr><th>投毒帧</th><th>DNS 请求</th>"
-        "<th>DNS 重定向</th><th>二层转发</th><th>RST</th><th>错误</th></tr></thead><tbody><tr>"
+        "<section><h2>Link counters (ARP redirection)</h2><table><thead><tr><th>Poisoning frames</th><th>DNS requests</th>"
+        "<th>DNS redirects</th><th>Layer 2 forwards</th><th>RST</th><th>Errors</th></tr></thead><tbody><tr>"
         "<td>%d</td><td>%d</td><td>%d</td><td>%d</td><td>%d</td><td class=\"%s\">%d</td>"
         "</tr></tbody></table></section></div></body></html>" % (
             a["poison"], a["dns"], a["redirect"], a["fwd_l2"], a["rst"],
@@ -714,7 +732,7 @@ def render() -> str:
 
 @app.after_request
 def _no_cache(resp):
-    # 浏览器绝不缓存，保证 2 秒刷新拿到的都是最新渲染
+    # Disable browser caching so each two-second refresh shows current data.
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
     resp.headers["Expires"] = "0"
@@ -723,7 +741,7 @@ def _no_cache(resp):
 
 @app.route("/")
 def index():
-    return Response(render(), mimetype="text/html; charset=utf-8")
+    return Response(render(request.args.get("api_prd") == "1"), mimetype="text/html; charset=utf-8")
 
 
 @app.route("/api/state")
